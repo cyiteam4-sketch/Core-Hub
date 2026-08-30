@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -57,7 +58,7 @@ app.use(express.json({
 }));
 
 // ============================================================
-// BASIC RATE LIMITER
+// RATE LIMITER
 // ============================================================
 
 const rateLimits = new Map();
@@ -80,21 +81,31 @@ function rateLimit(req, res, next) {
     const key = getClientKey(req);
     const now = Date.now();
 
-    let entry = rateLimits.get(key);
+    let entry =
+        rateLimits.get(key);
 
-    if (!entry || now - entry.start > RATE_LIMIT_WINDOW_MS) {
+    if (
+        !entry ||
+        now - entry.start > RATE_LIMIT_WINDOW_MS
+    ) {
 
         entry = {
             start: now,
             count: 0
         };
 
-        rateLimits.set(key, entry);
+        rateLimits.set(
+            key,
+            entry
+        );
     }
 
     entry.count++;
 
-    if (entry.count > RATE_LIMIT_MAX) {
+    if (
+        entry.count >
+        RATE_LIMIT_MAX
+    ) {
 
         return res.status(429).json({
             success: false,
@@ -105,20 +116,30 @@ function rateLimit(req, res, next) {
     next();
 }
 
-app.use("/api", rateLimit);
+app.use(
+    "/api",
+    rateLimit
+);
 
-// Clean old in-memory rate-limit entries
+// Clean old rate-limit entries
 setInterval(() => {
 
-    const now = Date.now();
+    const now =
+        Date.now();
 
-    for (const [key, entry] of rateLimits) {
+    for (
+        const [key, entry]
+        of rateLimits
+    ) {
 
         if (
             now - entry.start >
             RATE_LIMIT_WINDOW_MS * 2
         ) {
-            rateLimits.delete(key);
+
+            rateLimits.delete(
+                key
+            );
         }
     }
 
@@ -138,7 +159,9 @@ function hashToken(token) {
 
 function createToken() {
 
-    return crypto.randomBytes(32).toString("hex");
+    return crypto
+        .randomBytes(32)
+        .toString("hex");
 }
 
 function getBearerToken(req) {
@@ -150,99 +173,128 @@ function getBearerToken(req) {
         return null;
     }
 
-    if (!header.startsWith("Bearer ")) {
+    if (
+        !header.startsWith("Bearer ")
+    ) {
         return null;
     }
 
-    return header.slice(7).trim();
+    return header
+        .slice(7)
+        .trim();
 }
 
 // ============================================================
 // HEALTH
 // ============================================================
 
-app.get("/api/health", async (req, res) => {
+app.get(
+    "/api/health",
+    async (req, res) => {
 
-    try {
+        try {
 
-        await pool.query("SELECT 1");
+            await pool.query(
+                "SELECT 1"
+            );
 
-        res.json({
-            status: "ok",
-            service: "Core Hub API",
-            database: "connected"
-        });
+            res.json({
+                status: "ok",
+                service: "Core Hub API",
+                database: "connected"
+            });
 
-    } catch (error) {
+        } catch (error) {
 
-        console.error("HEALTH ERROR:", error);
+            console.error(
+                "HEALTH ERROR:",
+                error
+            );
 
-        res.status(503).json({
-            status: "error",
-            service: "Core Hub API",
-            database: "unavailable"
-        });
+            res.status(503).json({
+                status: "error",
+                service: "Core Hub API",
+                database: "unavailable"
+            });
+        }
     }
-});
+);
 
 // ============================================================
 // GUEST SESSIONS
 // ============================================================
 
 // CREATE GUEST SESSION
-app.post("/api/sessions", async (req, res) => {
 
-    try {
+app.post(
+    "/api/sessions",
+    async (req, res) => {
 
-        const token = createToken();
-        const tokenHash = hashToken(token);
+        try {
 
-        await pool.query(
-            `
-            INSERT INTO guest_sessions
-                (token_hash)
-            VALUES
-                ($1)
-            `,
-            [tokenHash]
-        );
+            const token =
+                createToken();
 
-        res.status(201).json({
-            success: true,
-            session: token,
-            expiresIn: SESSION_TIMEOUT_SECONDS
-        });
+            const tokenHash =
+                hashToken(token);
 
-    } catch (error) {
+            await pool.query(
+                `
+                INSERT INTO guest_sessions
+                    (token_hash)
+                VALUES
+                    ($1)
+                `,
+                [tokenHash]
+            );
 
-        console.error(
-            "SESSION CREATE ERROR:",
-            error
-        );
+            res.status(201).json({
+                success: true,
+                session: token,
+                expiresIn:
+                    SESSION_TIMEOUT_SECONDS
+            });
 
-        res.status(500).json({
-            success: false,
-            error: "Could not create session"
-        });
+        } catch (error) {
+
+            console.error(
+                "SESSION CREATE ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                error:
+                    "Could not create session"
+            });
+        }
     }
-});
+);
 
 // ============================================================
 // SESSION AUTHENTICATION
 // ============================================================
 
-async function requireSession(req, res, next) {
+async function requireSession(
+    req,
+    res,
+    next
+) {
 
     try {
 
         const token =
             getBearerToken(req);
 
-        if (!token || token.length !== 64) {
+        if (
+            !token ||
+            token.length !== 64
+        ) {
 
             return res.status(401).json({
                 success: false,
-                error: "Invalid or missing session"
+                error:
+                    "Invalid or missing session"
             });
         }
 
@@ -254,7 +306,8 @@ async function requireSession(req, res, next) {
                 `
                 SELECT
                     id,
-                    last_seen
+                    last_seen,
+                    current_game_id
                 FROM guest_sessions
                 WHERE token_hash = $1
                   AND last_seen >=
@@ -263,15 +316,19 @@ async function requireSession(req, res, next) {
                 [tokenHash]
             );
 
-        if (result.rows.length === 0) {
+        if (
+            result.rows.length === 0
+        ) {
 
             return res.status(401).json({
                 success: false,
-                error: "Session expired"
+                error:
+                    "Session expired"
             });
         }
 
-        req.session = result.rows[0];
+        req.session =
+            result.rows[0];
 
         next();
 
@@ -284,7 +341,8 @@ async function requireSession(req, res, next) {
 
         res.status(500).json({
             success: false,
-            error: "Session validation failed"
+            error:
+                "Session validation failed"
         });
     }
 }
@@ -300,18 +358,68 @@ app.post(
 
         try {
 
+            let gameId =
+                req.body?.gameId ?? null;
+
+            // Convert empty strings to null
+            if (
+                typeof gameId !== "string" ||
+                gameId.trim() === ""
+            ) {
+
+                gameId = null;
+
+            } else {
+
+                gameId =
+                    gameId.trim();
+            }
+
+            // If a game ID was supplied,
+            // make sure it is a real game.
+            if (gameId !== null) {
+
+                const game =
+                    await pool.query(
+                        `
+                        SELECT game_id
+                        FROM games
+                        WHERE game_id = $1
+                        `,
+                        [gameId]
+                    );
+
+                if (
+                    game.rows.length === 0
+                ) {
+
+                    return res.status(404).json({
+                        success: false,
+                        error:
+                            "Game not found"
+                    });
+                }
+            }
+
             await pool.query(
                 `
                 UPDATE guest_sessions
-                SET last_seen = NOW()
-                WHERE id = $1
+                SET
+                    last_seen = NOW(),
+                    current_game_id = $1
+                WHERE id = $2
                 `,
-                [req.session.id]
+                [
+                    gameId,
+                    req.session.id
+                ]
             );
 
             res.json({
                 success: true,
-                expiresIn: SESSION_TIMEOUT_SECONDS
+                gameId,
+                expiresIn:
+                    SESSION_TIMEOUT_SECONDS
             });
 
         } catch (error) {
@@ -323,7 +431,8 @@ app.post(
 
             res.status(500).json({
                 success: false,
-                error: "Heartbeat failed"
+                error:
+                    "Heartbeat failed"
             });
         }
     }
@@ -333,38 +442,91 @@ app.post(
 // ONLINE USERS
 // ============================================================
 
-app.get("/api/online", async (req, res) => {
+app.get(
+    "/api/online",
+    async (req, res) => {
 
-    try {
+        try {
 
-        const result =
-            await pool.query(
-                `
-                SELECT COUNT(*)::int AS online
-                FROM guest_sessions
-                WHERE last_seen >=
-                    NOW() - INTERVAL '60 seconds'
-                `
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        COUNT(*)::int AS online
+                    FROM guest_sessions
+                    WHERE last_seen >=
+                        NOW() - INTERVAL '60 seconds'
+                    `
+                );
+
+            res.json({
+                success: true,
+                online:
+                    result.rows[0].online
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ONLINE ERROR:",
+                error
             );
 
-        res.json({
-            success: true,
-            online: result.rows[0].online
-        });
-
-    } catch (error) {
-
-        console.error(
-            "ONLINE ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Could not get online users"
-        });
+            res.status(500).json({
+                success: false,
+                error:
+                    "Could not get online users"
+            });
+        }
     }
-});
+);
+
+// ============================================================
+// CURRENTLY PLAYING
+// ============================================================
+
+app.get(
+    "/api/online/games",
+    async (req, res) => {
+
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        current_game_id AS game_id,
+                        COUNT(*)::int AS players
+                    FROM guest_sessions
+                    WHERE last_seen >=
+                        NOW() - INTERVAL '60 seconds'
+                      AND current_game_id IS NOT NULL
+                    GROUP BY current_game_id
+                    ORDER BY players DESC
+                    `
+                );
+
+            res.json({
+                success: true,
+                games:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ONLINE GAMES ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                error:
+                    "Could not get active games"
+            });
+        }
+    }
+);
 
 // ============================================================
 // DELETE EXPIRED SESSIONS
@@ -383,7 +545,9 @@ async function cleanupSessions() {
                 `
             );
 
-        if (result.rowCount > 0) {
+        if (
+            result.rowCount > 0
+        ) {
 
             console.log(
                 `Cleaned ${result.rowCount} expired sessions`
@@ -409,89 +573,104 @@ setInterval(
 // ============================================================
 
 // GET ALL GAMES
-app.get("/api/games", async (req, res) => {
 
-    try {
+app.get(
+    "/api/games",
+    async (req, res) => {
 
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    game_id,
-                    name,
-                    category,
-                    url,
-                    status
-                FROM games
-                ORDER BY id DESC
-                `
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        game_id,
+                        name,
+                        category,
+                        url,
+                        status
+                    FROM games
+                    ORDER BY id DESC
+                    `
+                );
+
+            res.json({
+                success: true,
+                games:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "GAMES ERROR:",
+                error
             );
 
-        res.json({
-            success: true,
-            games: result.rows
-        });
-
-    } catch (error) {
-
-        console.error(
-            "GAMES ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Database error"
-        });
-    }
-});
-
-// GET ONE GAME
-app.get("/api/games/:gameId", async (req, res) => {
-
-    try {
-
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    game_id,
-                    name,
-                    category,
-                    url,
-                    status
-                FROM games
-                WHERE game_id = $1
-                `,
-                [req.params.gameId]
-            );
-
-        if (result.rows.length === 0) {
-
-            return res.status(404).json({
+            res.status(500).json({
                 success: false,
-                error: "Game not found"
+                error:
+                    "Database error"
             });
         }
-
-        res.json({
-            success: true,
-            game: result.rows[0]
-        });
-
-    } catch (error) {
-
-        console.error(
-            "GAME ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Database error"
-        });
     }
-});
+);
+
+// GET ONE GAME
+
+app.get(
+    "/api/games/:gameId",
+    async (req, res) => {
+
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        game_id,
+                        name,
+                        category,
+                        url,
+                        status
+                    FROM games
+                    WHERE game_id = $1
+                    `,
+                    [req.params.gameId]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "Game not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                game:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+
+            console.error(
+                "GAME ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                error:
+                    "Database error"
+            });
+        }
+    }
+);
 
 // ============================================================
 // GAME LAUNCHES
@@ -507,7 +686,6 @@ app.post(
             const gameId =
                 req.params.gameId;
 
-            // Verify game actually exists
             const game =
                 await pool.query(
                     `
@@ -518,11 +696,14 @@ app.post(
                     [gameId]
                 );
 
-            if (game.rows.length === 0) {
+            if (
+                game.rows.length === 0
+            ) {
 
                 return res.status(404).json({
                     success: false,
-                    error: "Game not found"
+                    error:
+                        "Game not found"
                 });
             }
 
@@ -532,6 +713,22 @@ app.post(
                     (game_id, session_id)
                 VALUES
                     ($1, $2)
+                `,
+                [
+                    gameId,
+                    req.session.id
+                ]
+            );
+
+            // Also mark this session
+            // as currently playing this game.
+            await pool.query(
+                `
+                UPDATE guest_sessions
+                SET
+                    last_seen = NOW(),
+                    current_game_id = $1
+                WHERE id = $2
                 `,
                 [
                     gameId,
@@ -553,7 +750,8 @@ app.post(
 
             res.status(500).json({
                 success: false,
-                error: "Could not record launch"
+                error:
+                    "Could not record launch"
             });
         }
     }
@@ -593,8 +791,10 @@ app.get(
 
             res.json({
                 success: true,
-                gameId: req.params.gameId,
-                stats: result.rows[0]
+                gameId:
+                    req.params.gameId,
+                stats:
+                    result.rows[0]
             });
 
         } catch (error) {
@@ -606,7 +806,8 @@ app.get(
 
             res.status(500).json({
                 success: false,
-                error: "Database error"
+                error:
+                    "Database error"
             });
         }
     }
@@ -616,150 +817,166 @@ app.get(
 // TRENDING
 // ============================================================
 
-app.get("/api/trending", async (req, res) => {
+app.get(
+    "/api/trending",
+    async (req, res) => {
 
-    try {
+        try {
 
-        const limit =
-            Math.min(
-                Number.parseInt(
-                    req.query.limit
-                ) || 10,
-                50
+            const limit =
+                Math.min(
+                    Number.parseInt(
+                        req.query.limit
+                    ) || 10,
+                    50
+                );
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        g.game_id,
+                        g.name,
+                        g.category,
+                        g.url,
+                        g.status,
+                        COUNT(l.id)::int AS launch_count
+
+                    FROM games g
+
+                    LEFT JOIN game_launches l
+                        ON l.game_id = g.game_id
+                        AND l.created_at >=
+                            NOW() - INTERVAL '7 days'
+
+                    GROUP BY
+                        g.game_id,
+                        g.name,
+                        g.category,
+                        g.url,
+                        g.status
+
+                    ORDER BY launch_count DESC
+
+                    LIMIT $1
+                    `,
+                    [limit]
+                );
+
+            res.json({
+                success: true,
+                games:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "TRENDING ERROR:",
+                error
             );
 
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    g.game_id,
-                    g.name,
-                    g.category,
-                    g.url,
-                    g.status,
-                    COUNT(l.id)::int AS launch_count
-
-                FROM games g
-
-                LEFT JOIN game_launches l
-                    ON l.game_id = g.game_id
-                    AND l.created_at >=
-                        NOW() - INTERVAL '7 days'
-
-                GROUP BY
-                    g.game_id,
-                    g.name,
-                    g.category,
-                    g.url,
-                    g.status
-
-                ORDER BY launch_count DESC
-
-                LIMIT $1
-                `,
-                [limit]
-            );
-
-        res.json({
-            success: true,
-            games: result.rows
-        });
-
-    } catch (error) {
-
-        console.error(
-            "TRENDING ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Database error"
-        });
+            res.status(500).json({
+                success: false,
+                error:
+                    "Database error"
+            });
+        }
     }
-});
+);
 
 // ============================================================
 // NEWS
 // ============================================================
 
-app.get("/api/news", async (req, res) => {
+app.get(
+    "/api/news",
+    async (req, res) => {
 
-    try {
+        try {
 
-        const limit =
-            Math.min(
-                Number.parseInt(
-                    req.query.limit
-                ) || 20,
-                50
+            const limit =
+                Math.min(
+                    Number.parseInt(
+                        req.query.limit
+                    ) || 20,
+                    50
+                );
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        id,
+                        title,
+                        content,
+                        created_at
+                    FROM news
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    `,
+                    [limit]
+                );
+
+            res.json({
+                success: true,
+                news:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "NEWS ERROR:",
+                error
             );
 
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    title,
-                    content,
-                    created_at
-                FROM news
-                ORDER BY created_at DESC
-                LIMIT $1
-                `,
-                [limit]
-            );
-
-        res.json({
-            success: true,
-            news: result.rows
-        });
-
-    } catch (error) {
-
-        console.error(
-            "NEWS ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Database error"
-        });
+            res.status(500).json({
+                success: false,
+                error:
+                    "Database error"
+            });
+        }
     }
-});
+);
 
 // ============================================================
 // 404
 // ============================================================
 
-app.use((req, res) => {
+app.use(
+    (req, res) => {
 
-    res.status(404).json({
-        success: false,
-        error: "Endpoint not found"
-    });
-});
+        res.status(404).json({
+            success: false,
+            error:
+                "Endpoint not found"
+        });
+    }
+);
 
 // ============================================================
 // ERROR HANDLER
 // ============================================================
 
-app.use((error, req, res, next) => {
+app.use(
+    (error, req, res, next) => {
 
-    console.error(
-        "SERVER ERROR:",
-        error
-    );
+        console.error(
+            "SERVER ERROR:",
+            error
+        );
 
-    res.status(500).json({
-        success: false,
-        error: "Internal server error"
-    });
-});
+        res.status(500).json({
+            success: false,
+            error:
+                "Internal server error"
+        });
+    }
+);
 
 // ============================================================
-// START
+// START SERVER
 // ============================================================
 
 app.listen(
@@ -772,3 +989,4 @@ app.listen(
         );
     }
 );
+
