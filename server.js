@@ -1,4 +1,3 @@
-
 require("dotenv").config();
 
 const express = require("express");
@@ -15,8 +14,11 @@ const PORT = process.env.PORT || 10000;
 // ============================================================
 
 const SESSION_TIMEOUT_SECONDS = 60;
+
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const RATE_LIMIT_MAX = 30;
+
+const ADMIN_ROUTE_PREFIX = "/api/admin";
 
 // ============================================================
 // DATABASE
@@ -24,9 +26,16 @@ const RATE_LIMIT_MAX = 30;
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
+
     ssl: {
         rejectUnauthorized: false
-    }
+    },
+
+    max: 10,
+
+    idleTimeoutMillis: 30_000,
+
+    connectionTimeoutMillis: 10_000
 });
 
 // ============================================================
@@ -38,24 +47,51 @@ const allowedOrigins = (process.env.CORS_ORIGIN || "*")
     .map(origin => origin.trim())
     .filter(Boolean);
 
-app.use(cors({
-    origin: (origin, callback) => {
+app.use(
+    cors({
+        origin: (origin, callback) => {
 
-        if (!origin || allowedOrigins.includes("*")) {
-            return callback(null, true);
-        }
+            // Requests without an Origin header
+            // are allowed for tools/server-to-server calls.
+            if (!origin) {
+                return callback(null, true);
+            }
 
-        if (allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
+            // Temporary open CORS mode.
+            // Set CORS_ORIGIN later for production lockdown.
+            if (allowedOrigins.includes("*")) {
+                return callback(null, true);
+            }
 
-        return callback(new Error("CORS blocked"));
-    }
-}));
+            if (allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
 
-app.use(express.json({
-    limit: "20kb"
-}));
+            return callback(new Error("CORS blocked"));
+        },
+
+        methods: [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "OPTIONS"
+        ],
+
+        allowedHeaders: [
+            "Content-Type",
+            "Authorization",
+            "X-Admin-Action"
+        ]
+    })
+);
+
+app.use(
+    express.json({
+        limit: "20kb"
+    })
+);
 
 // ============================================================
 // RATE LIMITER
@@ -68,25 +104,34 @@ function getClientKey(req) {
     const forwarded =
         req.headers["x-forwarded-for"];
 
-    const ip =
-        forwarded
-            ? String(forwarded).split(",")[0].trim()
-            : req.socket.remoteAddress || "unknown";
+    if (forwarded) {
 
-    return ip;
+        return String(forwarded)
+            .split(",")[0]
+            .trim();
+    }
+
+    return (
+        req.socket.remoteAddress ||
+        "unknown"
+    );
 }
 
 function rateLimit(req, res, next) {
 
-    const key = getClientKey(req);
-    const now = Date.now();
+    const key =
+        getClientKey(req);
+
+    const now =
+        Date.now();
 
     let entry =
         rateLimits.get(key);
 
     if (
         !entry ||
-        now - entry.start > RATE_LIMIT_WINDOW_MS
+        now - entry.start >
+        RATE_LIMIT_WINDOW_MS
     ) {
 
         entry = {
@@ -121,7 +166,8 @@ app.use(
     rateLimit
 );
 
-// Clean old rate-limit entries
+// Cleanup old rate-limit records.
+
 setInterval(() => {
 
     const now =
@@ -137,9 +183,7 @@ setInterval(() => {
             RATE_LIMIT_WINDOW_MS * 2
         ) {
 
-            rateLimits.delete(
-                key
-            );
+            rateLimits.delete(key);
         }
     }
 
@@ -179,9 +223,23 @@ function getBearerToken(req) {
         return null;
     }
 
-    return header
-        .slice(7)
-        .trim();
+    const token =
+        header
+            .slice(7)
+            .trim();
+
+    return token || null;
+}
+
+function sendServerError(
+    res,
+    message = "Internal server error"
+) {
+
+    return res.status(500).json({
+        success: false,
+        error: message
+    });
 }
 
 // ============================================================
@@ -199,6 +257,7 @@ app.get(
             );
 
             res.json({
+                success: true,
                 status: "ok",
                 service: "Core Hub API",
                 database: "connected"
@@ -212,6 +271,7 @@ app.get(
             );
 
             res.status(503).json({
+                success: false,
                 status: "error",
                 service: "Core Hub API",
                 database: "unavailable"
@@ -219,6 +279,55 @@ app.get(
         }
     }
 );
+
+// ============================================================
+// ROUTE MAP
+// ============================================================
+
+/*
+
+PUBLIC API
+----------
+
+GET    /api/health
+
+POST   /api/sessions
+POST   /api/sessions/heartbeat
+
+GET    /api/online
+GET    /api/online/games
+
+GET    /api/games
+GET    /api/games/:gameId
+POST   /api/games/:gameId/launch
+GET    /api/games/:gameId/stats
+
+GET    /api/trending
+
+GET    /api/news
+
+
+FUTURE ADMIN API
+----------------
+
+POST   /api/admin/auth/login
+POST   /api/admin/auth/logout
+GET    /api/admin/auth/me
+
+GET    /api/admin/games
+POST   /api/admin/games
+PUT    /api/admin/games/:gameId
+DELETE /api/admin/games/:gameId
+
+GET    /api/admin/news
+POST   /api/admin/news
+PUT    /api/admin/news/:id
+DELETE /api/admin/news/:id
+
+These routes are reserved now so the
+admin panel can be added cleanly later.
+
+*/
 
 // ============================================================
 // GUEST SESSIONS
@@ -262,11 +371,10 @@ app.post(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Could not create session"
-            });
+            sendServerError(
+                res,
+                "Could not create session"
+            );
         }
     }
 );
@@ -339,11 +447,10 @@ async function requireSession(
             error
         );
 
-        res.status(500).json({
-            success: false,
-            error:
-                "Session validation failed"
-        });
+        sendServerError(
+            res,
+            "Session validation failed"
+        );
     }
 }
 
@@ -361,7 +468,6 @@ app.post(
             let gameId =
                 req.body?.gameId ?? null;
 
-            // Convert empty strings to null
             if (
                 typeof gameId !== "string" ||
                 gameId.trim() === ""
@@ -375,8 +481,6 @@ app.post(
                     gameId.trim();
             }
 
-            // If a game ID was supplied,
-            // make sure it is a real game.
             if (gameId !== null) {
 
                 const game =
@@ -429,11 +533,10 @@ app.post(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Heartbeat failed"
-            });
+            sendServerError(
+                res,
+                "Heartbeat failed"
+            );
         }
     }
 );
@@ -472,11 +575,10 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Could not get online users"
-            });
+            sendServerError(
+                res,
+                "Could not get online users"
+            );
         }
     }
 );
@@ -519,17 +621,16 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Could not get active games"
-            });
+            sendServerError(
+                res,
+                "Could not get active games"
+            );
         }
     }
 );
 
 // ============================================================
-// DELETE EXPIRED SESSIONS
+// SESSION CLEANUP
 // ============================================================
 
 async function cleanupSessions() {
@@ -607,11 +708,10 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Database error"
-            });
+            sendServerError(
+                res,
+                "Database error"
+            );
         }
     }
 );
@@ -663,11 +763,10 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Database error"
-            });
+            sendServerError(
+                res,
+                "Database error"
+            );
         }
     }
 );
@@ -720,8 +819,6 @@ app.post(
                 ]
             );
 
-            // Also mark this session
-            // as currently playing this game.
             await pool.query(
                 `
                 UPDATE guest_sessions
@@ -748,11 +845,10 @@ app.post(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Could not record launch"
-            });
+            sendServerError(
+                res,
+                "Could not record launch"
+            );
         }
     }
 );
@@ -804,11 +900,10 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Database error"
-            });
+            sendServerError(
+                res,
+                "Database error"
+            );
         }
     }
 );
@@ -823,11 +918,17 @@ app.get(
 
         try {
 
+            const requestedLimit =
+                Number.parseInt(
+                    req.query.limit,
+                    10
+                );
+
             const limit =
                 Math.min(
-                    Number.parseInt(
-                        req.query.limit
-                    ) || 10,
+                    Number.isFinite(requestedLimit)
+                        ? requestedLimit
+                        : 10,
                     50
                 );
 
@@ -856,7 +957,8 @@ app.get(
                         g.url,
                         g.status
 
-                    ORDER BY launch_count DESC
+                    ORDER BY
+                        launch_count DESC
 
                     LIMIT $1
                     `,
@@ -876,11 +978,10 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Database error"
-            });
+            sendServerError(
+                res,
+                "Database error"
+            );
         }
     }
 );
@@ -889,17 +990,28 @@ app.get(
 // NEWS
 // ============================================================
 
+// PUBLIC NEWS FEED
+//
+// This is the endpoint the public
+// Core Hub Games News page will use.
+
 app.get(
     "/api/news",
     async (req, res) => {
 
         try {
 
+            const requestedLimit =
+                Number.parseInt(
+                    req.query.limit,
+                    10
+                );
+
             const limit =
                 Math.min(
-                    Number.parseInt(
-                        req.query.limit
-                    ) || 20,
+                    Number.isFinite(requestedLimit)
+                        ? requestedLimit
+                        : 20,
                     50
                 );
 
@@ -931,12 +1043,168 @@ app.get(
                 error
             );
 
-            res.status(500).json({
-                success: false,
-                error:
-                    "Database error"
-            });
+            sendServerError(
+                res,
+                "Database error"
+            );
         }
+    }
+);
+
+// ============================================================
+// FUTURE ADMIN AUTH
+// ============================================================
+//
+// Reserved for the separate admin panel.
+//
+// Planned:
+// POST /api/admin/auth/login
+// POST /api/admin/auth/logout
+// GET  /api/admin/auth/me
+//
+// The actual admin authentication should be
+// implemented server-side before these routes
+// are used in production.
+//
+// ============================================================
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/auth/login`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin authentication is not enabled yet"
+        });
+    }
+);
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/auth/logout`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin authentication is not enabled yet"
+        });
+    }
+);
+
+app.get(
+    `${ADMIN_ROUTE_PREFIX}/auth/me`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin authentication is not enabled yet"
+        });
+    }
+);
+
+// ============================================================
+// FUTURE ADMIN GAMES
+// ============================================================
+
+app.get(
+    `${ADMIN_ROUTE_PREFIX}/games`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin games API is not enabled yet"
+        });
+    }
+);
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/games`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin games API is not enabled yet"
+        });
+    }
+);
+
+app.put(
+    `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin games API is not enabled yet"
+        });
+    }
+);
+
+app.delete(
+    `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin games API is not enabled yet"
+        });
+    }
+);
+
+// ============================================================
+// FUTURE ADMIN NEWS
+// ============================================================
+
+app.get(
+    `${ADMIN_ROUTE_PREFIX}/news`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin news API is not enabled yet"
+        });
+    }
+);
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/news`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin news API is not enabled yet"
+        });
+    }
+);
+
+app.put(
+    `${ADMIN_ROUTE_PREFIX}/news/:id`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin news API is not enabled yet"
+        });
+    }
+);
+
+app.delete(
+    `${ADMIN_ROUTE_PREFIX}/news/:id`,
+    (req, res) => {
+
+        res.status(501).json({
+            success: false,
+            error:
+                "Admin news API is not enabled yet"
+        });
     }
 );
 
@@ -979,14 +1247,66 @@ app.use(
 // START SERVER
 // ============================================================
 
-app.listen(
-    PORT,
-    "0.0.0.0",
-    () => {
+const server =
+    app.listen(
+        PORT,
+        "0.0.0.0",
+        () => {
 
-        console.log(
-            `Core Hub API running on port ${PORT}`
-        );
-    }
+            console.log(
+                `Core Hub API running on port ${PORT}`
+            );
+
+            console.log(
+                `Public API ready at port ${PORT}`
+            );
+
+            console.log(
+                `Future admin API reserved at ${ADMIN_ROUTE_PREFIX}`
+            );
+        }
+    );
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// ============================================================
+
+async function shutdown(signal) {
+
+    console.log(
+        `${signal} received. Shutting down...`
+    );
+
+    server.close(async () => {
+
+        try {
+
+            await pool.end();
+
+            console.log(
+                "Database pool closed."
+            );
+
+            process.exit(0);
+
+        } catch (error) {
+
+            console.error(
+                "SHUTDOWN ERROR:",
+                error
+            );
+
+            process.exit(1);
+        }
+    });
+}
+
+process.on(
+    "SIGTERM",
+    () => shutdown("SIGTERM")
 );
 
+process.on(
+    "SIGINT",
+    () => shutdown("SIGINT")
+);
