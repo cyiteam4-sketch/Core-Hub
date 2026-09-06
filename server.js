@@ -275,7 +275,10 @@ app.get("/api/health", async (req, res) => {
             database: "connected"
         });
     } catch (error) {
-        console.error("Health error:", error.message);
+        console.error(
+            "Health error:",
+            error.message
+        );
 
         res.status(500).json({
             success: false,
@@ -341,7 +344,15 @@ app.post(
                 });
             }
 
-            const token = auth.substring(7);
+            const token = auth.substring(7).trim();
+
+            if (!token) {
+                return res.status(401).json({
+                    success: false,
+                    error: "Missing token"
+                });
+            }
+
             const tokenHash = hashToken(token);
 
             const currentGameId =
@@ -530,7 +541,36 @@ app.post(
     "/api/games/:gameId/launch",
     async (req, res) => {
         try {
-            const gameId = req.params.gameId;
+            const gameId =
+                String(req.params.gameId || "").trim();
+
+            if (!gameId) {
+                return res.status(400).json({
+                    success: false,
+                    error: "Missing gameId"
+                });
+            }
+
+            /* IMPORTANT FIX:
+               Verify the game exists BEFORE
+               inserting a launch record.
+            */
+
+            const gameResult = await pool.query(`
+                SELECT game_id
+                FROM games
+                WHERE game_id = $1
+                LIMIT 1
+            `, [
+                gameId
+            ]);
+
+            if (!gameResult.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Game not found"
+                });
+            }
 
             const sessionId =
                 req.body?.sessionId || null;
@@ -762,8 +802,6 @@ app.post(
         const ipHash = hashIP(ip);
 
         try {
-            /* GLOBAL COOLDOWN */
-
             const cooldownRemaining =
                 getGlobalAdminCooldownRemaining();
 
@@ -801,8 +839,6 @@ app.post(
                     });
             }
 
-            /* IP BLACKLIST */
-
             const blacklist =
                 await pool.query(`
                     SELECT id
@@ -838,8 +874,6 @@ app.post(
 
             const submittedCode =
                 req.body?.code || "";
-
-            /* WRONG CODE */
 
             if (
                 !safeCodeMatch(
@@ -923,8 +957,6 @@ app.post(
                     error: "Invalid code"
                 });
             }
-
-            /* SUCCESSFUL LOGIN */
 
             const session =
                 await createAdminSession();
