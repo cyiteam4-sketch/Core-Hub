@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -12,6 +13,10 @@ app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
+/* =========================================================
+   CORS
+========================================================= */
+
 const allowedOrigins = [
     "https://corehubgames.com",
     "https://www.corehubgames.com",
@@ -22,13 +27,17 @@ const allowedOrigins = [
 app.use(cors({
     origin(origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            callback(new Error("CORS not allowed"));
+            return callback(null, true);
         }
+
+        return callback(new Error("CORS not allowed"));
     },
     credentials: true
 }));
+
+/* =========================================================
+   DATABASE
+========================================================= */
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -71,17 +80,25 @@ function normalizeIP(ip) {
 function getClientIP(req) {
     const cfIP = req.headers["cf-connecting-ip"];
 
-    if (cfIP && net.isIP(normalizeIP(cfIP))) {
-        return normalizeIP(cfIP);
+    if (cfIP) {
+        const normalized = normalizeIP(cfIP);
+
+        if (normalized !== "unknown") {
+            return normalized;
+        }
     }
 
     const forwarded = req.headers["x-forwarded-for"];
 
     if (forwarded) {
-        const first = String(forwarded).split(",")[0].trim();
+        const first = String(forwarded)
+            .split(",")[0]
+            .trim();
 
-        if (net.isIP(normalizeIP(first))) {
-            return normalizeIP(first);
+        const normalized = normalizeIP(first);
+
+        if (normalized !== "unknown") {
+            return normalized;
         }
     }
 
@@ -102,6 +119,10 @@ function hashToken(token) {
         .digest("hex");
 }
 
+function generateToken() {
+    return crypto.randomBytes(32).toString("hex");
+}
+
 function safeCodeMatch(a, b) {
     const aBuffer = Buffer.from(String(a || ""));
     const bBuffer = Buffer.from(String(b || ""));
@@ -111,10 +132,6 @@ function safeCodeMatch(a, b) {
     }
 
     return crypto.timingSafeEqual(aBuffer, bBuffer);
-}
-
-function generateToken() {
-    return crypto.randomBytes(32).toString("hex");
 }
 
 /* =========================================================
@@ -132,7 +149,7 @@ function standardRateLimit(req, res, next) {
 
     let entry = rateState.get(ip);
 
-    if (!entry || now - entry.start > RATE_WINDOW_MS) {
+    if (!entry || now - entry.start >= RATE_WINDOW_MS) {
         entry = {
             start: now,
             count: 0
@@ -156,7 +173,7 @@ function standardRateLimit(req, res, next) {
 app.use(standardRateLimit);
 
 /* =========================================================
-   GLOBAL ADMIN LOGIN BURST PROTECTION
+   GLOBAL ADMIN BURST PROTECTION
 ========================================================= */
 
 const GLOBAL_ADMIN_FAILURE_WINDOW_MS = 60_000;
@@ -167,11 +184,13 @@ let globalAdminFailures = [];
 let globalAdminCooldownUntil = 0;
 
 function cleanupGlobalAdminFailures() {
-    const cutoff = Date.now() - GLOBAL_ADMIN_FAILURE_WINDOW_MS;
+    const cutoff =
+        Date.now() - GLOBAL_ADMIN_FAILURE_WINDOW_MS;
 
-    globalAdminFailures = globalAdminFailures.filter(
-        timestamp => timestamp >= cutoff
-    );
+    globalAdminFailures =
+        globalAdminFailures.filter(
+            timestamp => timestamp >= cutoff
+        );
 }
 
 function recordGlobalAdminFailure() {
@@ -179,14 +198,20 @@ function recordGlobalAdminFailure() {
 
     globalAdminFailures.push(Date.now());
 
-    if (globalAdminFailures.length >= GLOBAL_ADMIN_FAILURE_THRESHOLD) {
-        globalAdminCooldownUntil = Date.now() + GLOBAL_ADMIN_COOLDOWN_MS;
+    if (
+        globalAdminFailures.length >=
+        GLOBAL_ADMIN_FAILURE_THRESHOLD
+    ) {
+        globalAdminCooldownUntil =
+            Date.now() + GLOBAL_ADMIN_COOLDOWN_MS;
+
         globalAdminFailures = [];
     }
 }
 
 function getGlobalAdminCooldownRemaining() {
-    const remaining = globalAdminCooldownUntil - Date.now();
+    const remaining =
+        globalAdminCooldownUntil - Date.now();
 
     return remaining > 0 ? remaining : 0;
 }
@@ -218,12 +243,22 @@ async function cleanupExpiredSecurityData() {
             WHERE created_at < NOW() - INTERVAL '90 days'
         `);
 
+        await pool.query(`
+            DELETE FROM guest_sessions
+            WHERE last_seen < NOW() - INTERVAL '1 day'
+        `);
     } catch (error) {
-        console.error("Security cleanup error:", error.message);
+        console.error(
+            "Security cleanup error:",
+            error.message
+        );
     }
 }
 
-setInterval(cleanupExpiredSecurityData, 60 * 60 * 1000);
+setInterval(
+    cleanupExpiredSecurityData,
+    60 * 60 * 1000
+);
 
 /* =========================================================
    HEALTH
@@ -240,9 +275,12 @@ app.get("/api/health", async (req, res) => {
             database: "connected"
         });
     } catch (error) {
+        console.error("Health error:", error.message);
+
         res.status(500).json({
             success: false,
             status: "error",
+            service: "Core Hub API",
             database: "disconnected"
         });
     }
@@ -256,7 +294,6 @@ app.post("/api/sessions", async (req, res) => {
     try {
         const token = generateToken();
         const tokenHash = hashToken(token);
-
         const anonymousSessionId =
             crypto.randomUUID();
 
@@ -272,14 +309,16 @@ app.post("/api/sessions", async (req, res) => {
             anonymousSessionId
         ]);
 
-        res.json({
+        res.status(201).json({
             success: true,
             token,
             sessionId: anonymousSessionId
         });
-
     } catch (error) {
-        console.error(error);
+        console.error(
+            "Create session error:",
+            error.message
+        );
 
         res.status(500).json({
             success: false,
@@ -288,41 +327,67 @@ app.post("/api/sessions", async (req, res) => {
     }
 });
 
-app.post("/api/sessions/heartbeat", async (req, res) => {
-    try {
-        const auth = req.headers.authorization || "";
+app.post(
+    "/api/sessions/heartbeat",
+    async (req, res) => {
+        try {
+            const auth =
+                req.headers.authorization || "";
 
-        if (!auth.startsWith("Bearer ")) {
-            return res.status(401).json({
+            if (!auth.startsWith("Bearer ")) {
+                return res.status(401).json({
+                    success: false,
+                    error: "Missing token"
+                });
+            }
+
+            const token = auth.substring(7);
+            const tokenHash = hashToken(token);
+
+            const currentGameId =
+                req.body?.currentGameId || null;
+
+            const result = await pool.query(`
+                UPDATE guest_sessions
+                SET
+                    last_seen = NOW(),
+                    current_game_id = $2
+                WHERE token_hash = $1
+                RETURNING anonymous_session_id
+            `, [
+                tokenHash,
+                currentGameId
+            ]);
+
+            if (!result.rowCount) {
+                return res.status(401).json({
+                    success: false,
+                    error: "Invalid session"
+                });
+            }
+
+            res.json({
+                success: true,
+                sessionId:
+                    result.rows[0].anonymous_session_id
+            });
+        } catch (error) {
+            console.error(
+                "Heartbeat error:",
+                error.message
+            );
+
+            res.status(500).json({
                 success: false,
-                error: "Missing token"
+                error: "Heartbeat failed"
             });
         }
-
-        const token = auth.substring(7);
-        const tokenHash = hashToken(token);
-
-        await pool.query(`
-            UPDATE guest_sessions
-            SET last_seen = NOW(),
-                current_game_id = COALESCE($2, current_game_id)
-            WHERE token_hash = $1
-        `, [
-            tokenHash,
-            req.body?.currentGameId || null
-        ]);
-
-        res.json({
-            success: true
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: "Heartbeat failed"
-        });
     }
-});
+);
+
+/* =========================================================
+   ONLINE
+========================================================= */
 
 app.get("/api/online", async (req, res) => {
     try {
@@ -336,8 +401,12 @@ app.get("/api/online", async (req, res) => {
             success: true,
             online: result.rows[0].online
         });
-
     } catch (error) {
+        console.error(
+            "Online error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             online: 0
@@ -362,8 +431,12 @@ app.get("/api/online/games", async (req, res) => {
             success: true,
             games: result.rows
         });
-
     } catch (error) {
+        console.error(
+            "Online games error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             games: []
@@ -378,7 +451,14 @@ app.get("/api/online/games", async (req, res) => {
 app.get("/api/games", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT *
+            SELECT
+                id,
+                url,
+                name,
+                status,
+                game_id,
+                category,
+                created_at
             FROM games
             ORDER BY created_at DESC
         `);
@@ -387,8 +467,12 @@ app.get("/api/games", async (req, res) => {
             success: true,
             games: result.rows
         });
-
     } catch (error) {
+        console.error(
+            "Games error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             games: []
@@ -399,7 +483,14 @@ app.get("/api/games", async (req, res) => {
 app.get("/api/games/:gameId", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT *
+            SELECT
+                id,
+                url,
+                name,
+                status,
+                game_id,
+                category,
+                created_at
             FROM games
             WHERE game_id = $1
             LIMIT 1
@@ -418,8 +509,12 @@ app.get("/api/games/:gameId", async (req, res) => {
             success: true,
             game: result.rows[0]
         });
-
     } catch (error) {
+        console.error(
+            "Single game error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             error: "Failed to load game"
@@ -427,69 +522,88 @@ app.get("/api/games/:gameId", async (req, res) => {
     }
 });
 
-app.post("/api/games/:gameId/launch", async (req, res) => {
-    try {
-        const gameId = req.params.gameId;
+/* =========================================================
+   GAME LAUNCHES
+========================================================= */
 
-        await pool.query(`
-            INSERT INTO game_launches (
-                game_id,
-                anonymous_session_id,
-                event_type,
-                created_at
-            )
-            VALUES ($1, $2, $3, NOW())
-        `, [
-            gameId,
-            req.body?.sessionId || null,
-            "launch"
-        ]);
+app.post(
+    "/api/games/:gameId/launch",
+    async (req, res) => {
+        try {
+            const gameId = req.params.gameId;
 
-        res.json({
-            success: true
-        });
+            const sessionId =
+                req.body?.sessionId || null;
 
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: "Failed to record launch"
-        });
+            await pool.query(`
+                INSERT INTO game_launches (
+                    game_id,
+                    session_id,
+                    created_at
+                )
+                VALUES ($1, $2, NOW())
+            `, [
+                gameId,
+                sessionId
+            ]);
+
+            res.json({
+                success: true
+            });
+        } catch (error) {
+            console.error(
+                "Launch error:",
+                error.message
+            );
+
+            res.status(500).json({
+                success: false,
+                error: "Failed to record launch"
+            });
+        }
     }
-});
+);
 
-app.get("/api/games/:gameId/stats", async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT
-                COUNT(*)::int AS total,
-                COUNT(*) FILTER (
-                    WHERE created_at >= NOW() - INTERVAL '1 day'
-                )::int AS today,
-                COUNT(*) FILTER (
-                    WHERE created_at >= NOW() - INTERVAL '7 days'
-                )::int AS week
-            FROM game_launches
-            WHERE game_id = $1
-        `, [
-            req.params.gameId
-        ]);
+app.get(
+    "/api/games/:gameId/stats",
+    async (req, res) => {
+        try {
+            const result = await pool.query(`
+                SELECT
+                    COUNT(*)::int AS total,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '1 day'
+                    )::int AS today,
+                    COUNT(*) FILTER (
+                        WHERE created_at >= NOW() - INTERVAL '7 days'
+                    )::int AS week
+                FROM game_launches
+                WHERE game_id = $1
+            `, [
+                req.params.gameId
+            ]);
 
-        res.json({
-            success: true,
-            stats: result.rows[0]
-        });
+            res.json({
+                success: true,
+                stats: result.rows[0]
+            });
+        } catch (error) {
+            console.error(
+                "Game stats error:",
+                error.message
+            );
 
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            stats: {
-                total: 0,
-                today: 0,
-                week: 0
-            }
-        });
+            res.status(500).json({
+                success: false,
+                stats: {
+                    total: 0,
+                    today: 0,
+                    week: 0
+                }
+            });
+        }
     }
-});
+);
 
 app.get("/api/trending", async (req, res) => {
     try {
@@ -508,8 +622,12 @@ app.get("/api/trending", async (req, res) => {
             success: true,
             games: result.rows
         });
-
     } catch (error) {
+        console.error(
+            "Trending error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             games: []
@@ -524,7 +642,14 @@ app.get("/api/trending", async (req, res) => {
 app.get("/api/news", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT *
+            SELECT
+                id,
+                type,
+                title,
+                content,
+                featured,
+                published,
+                created_at
             FROM news
             ORDER BY created_at DESC
         `);
@@ -533,8 +658,12 @@ app.get("/api/news", async (req, res) => {
             success: true,
             news: result.rows
         });
-
     } catch (error) {
+        console.error(
+            "News error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             news: []
@@ -543,7 +672,7 @@ app.get("/api/news", async (req, res) => {
 });
 
 /* =========================================================
-   ADMIN SESSION AUTH
+   ADMIN SESSION
 ========================================================= */
 
 async function createAdminSession() {
@@ -576,7 +705,8 @@ async function createAdminSession() {
 
 async function requireAdmin(req, res, next) {
     try {
-        const token = req.cookies.corehub_admin;
+        const token =
+            req.cookies.corehub_admin;
 
         if (!token) {
             return res.status(401).json({
@@ -588,7 +718,7 @@ async function requireAdmin(req, res, next) {
         const tokenHash = hashToken(token);
 
         const result = await pool.query(`
-            SELECT id, expires_at
+            SELECT id
             FROM admin_sessions
             WHERE token_hash = $1
               AND expires_at > NOW()
@@ -604,11 +734,16 @@ async function requireAdmin(req, res, next) {
             });
         }
 
-        req.adminSessionId = result.rows[0].id;
+        req.adminSessionId =
+            result.rows[0].id;
 
         next();
-
     } catch (error) {
+        console.error(
+            "Admin auth error:",
+            error.message
+        );
+
         res.status(500).json({
             success: false,
             error: "Authentication error"
@@ -620,139 +755,69 @@ async function requireAdmin(req, res, next) {
    ADMIN LOGIN
 ========================================================= */
 
-app.post("/api/admin/auth/login", async (req, res) => {
-    const ip = getClientIP(req);
-    const ipHash = hashIP(ip);
+app.post(
+    "/api/admin/auth/login",
+    async (req, res) => {
+        const ip = getClientIP(req);
+        const ipHash = hashIP(ip);
 
-    try {
-        /* GLOBAL COOLDOWN */
+        try {
+            /* GLOBAL COOLDOWN */
 
-        const cooldownRemaining =
-            getGlobalAdminCooldownRemaining();
+            const cooldownRemaining =
+                getGlobalAdminCooldownRemaining();
 
-        if (cooldownRemaining > 0) {
-            await pool.query(`
-                INSERT INTO admin_login_logs (
-                    ip_hash,
-                    successful,
-                    reason,
-                    created_at
-                )
-                VALUES ($1, FALSE, $2, NOW())
-            `, [
-                ipHash,
-                "global_cooldown"
-            ]);
-
-            return res
-                .status(429)
-                .set("Retry-After", String(
-                    Math.ceil(cooldownRemaining / 1000)
-                ))
-                .json({
-                    success: false,
-                    error: "Admin login temporarily restricted",
-                    retryAfter: Math.ceil(
-                        cooldownRemaining / 1000
-                    )
-                });
-        }
-
-        /* IP BLACKLIST */
-
-        const blacklist = await pool.query(`
-            SELECT id, expires_at
-            FROM admin_ip_blacklist
-            WHERE ip_hash = $1
-              AND (
-                  expires_at IS NULL
-                  OR expires_at > NOW()
-              )
-            LIMIT 1
-        `, [
-            ipHash
-        ]);
-
-        if (blacklist.rowCount) {
-            await pool.query(`
-                INSERT INTO admin_login_logs (
-                    ip_hash,
-                    successful,
-                    reason,
-                    created_at
-                )
-                VALUES ($1, FALSE, 'blocked', NOW())
-            `, [
-                ipHash
-            ]);
-
-            return res
-                .status(429)
-                .json({
-                    success: false,
-                    error: "IP blocked"
-                });
-        }
-
-        const submittedCode = req.body?.code || "";
-
-        /* WRONG CODE */
-
-        if (!safeCodeMatch(
-            submittedCode,
-            ADMIN_LOGIN_CODE
-        )) {
-
-            await pool.query(`
-                INSERT INTO admin_login_logs (
-                    ip_hash,
-                    successful,
-                    reason,
-                    created_at
-                )
-                VALUES ($1, FALSE, 'invalid_code', NOW())
-            `, [
-                ipHash
-            ]);
-
-            recordGlobalAdminFailure();
-
-            const failureCount = await pool.query(`
-                SELECT COUNT(*)::int AS count
-                FROM admin_login_logs
-                WHERE ip_hash = $1
-                  AND successful = FALSE
-                  AND reason = 'invalid_code'
-                  AND created_at >= NOW() - INTERVAL '15 minutes'
-            `, [
-                ipHash
-            ]);
-
-            const count =
-                failureCount.rows[0]?.count || 0;
-
-            if (count >= 5) {
+            if (cooldownRemaining > 0) {
                 await pool.query(`
-                    INSERT INTO admin_ip_blacklist (
+                    INSERT INTO admin_login_logs (
                         ip_hash,
+                        successful,
                         reason,
-                        expires_at,
                         created_at
                     )
-                    VALUES (
-                        $1,
-                        'Automatic block after 5 failed login attempts',
-                        NOW() + INTERVAL '15 minutes',
-                        NOW()
-                    )
-                    ON CONFLICT (ip_hash)
-                    DO UPDATE SET
-                        reason = EXCLUDED.reason,
-                        expires_at = EXCLUDED.expires_at
+                    VALUES ($1, FALSE, 'global_cooldown', NOW())
                 `, [
                     ipHash
                 ]);
 
+                return res
+                    .status(429)
+                    .set(
+                        "Retry-After",
+                        String(
+                            Math.ceil(
+                                cooldownRemaining / 1000
+                            )
+                        )
+                    )
+                    .json({
+                        success: false,
+                        error:
+                            "Admin login temporarily restricted",
+                        retryAfter:
+                            Math.ceil(
+                                cooldownRemaining / 1000
+                            )
+                    });
+            }
+
+            /* IP BLACKLIST */
+
+            const blacklist =
+                await pool.query(`
+                    SELECT id
+                    FROM admin_ip_blacklist
+                    WHERE ip_hash = $1
+                      AND (
+                          expires_at IS NULL
+                          OR expires_at > NOW()
+                      )
+                    LIMIT 1
+                `, [
+                    ipHash
+                ]);
+
+            if (blacklist.rowCount) {
                 await pool.query(`
                     INSERT INTO admin_login_logs (
                         ip_hash,
@@ -765,86 +830,163 @@ app.post("/api/admin/auth/login", async (req, res) => {
                     ipHash
                 ]);
 
-                return res
-                    .status(429)
-                    .json({
-                        success: false,
-                        error: "IP temporarily blocked"
-                    });
+                return res.status(429).json({
+                    success: false,
+                    error: "IP blocked"
+                });
             }
 
-            return res
-                .status(401)
-                .json({
+            const submittedCode =
+                req.body?.code || "";
+
+            /* WRONG CODE */
+
+            if (
+                !safeCodeMatch(
+                    submittedCode,
+                    ADMIN_LOGIN_CODE
+                )
+            ) {
+                await pool.query(`
+                    INSERT INTO admin_login_logs (
+                        ip_hash,
+                        successful,
+                        reason,
+                        created_at
+                    )
+                    VALUES ($1, FALSE, 'invalid_code', NOW())
+                `, [
+                    ipHash
+                ]);
+
+                recordGlobalAdminFailure();
+
+                const failureResult =
+                    await pool.query(`
+                        SELECT COUNT(*)::int AS count
+                        FROM admin_login_logs
+                        WHERE ip_hash = $1
+                          AND successful = FALSE
+                          AND reason = 'invalid_code'
+                          AND created_at >=
+                              NOW() - INTERVAL '15 minutes'
+                    `, [
+                        ipHash
+                    ]);
+
+                const count =
+                    failureResult.rows[0]?.count || 0;
+
+                if (count >= 5) {
+                    await pool.query(`
+                        INSERT INTO admin_ip_blacklist (
+                            ip_hash,
+                            reason,
+                            expires_at,
+                            created_at
+                        )
+                        VALUES (
+                            $1,
+                            'Automatic block after 5 failed login attempts',
+                            NOW() + INTERVAL '15 minutes',
+                            NOW()
+                        )
+                        ON CONFLICT (ip_hash)
+                        DO UPDATE SET
+                            reason = EXCLUDED.reason,
+                            expires_at = EXCLUDED.expires_at
+                    `, [
+                        ipHash
+                    ]);
+
+                    await pool.query(`
+                        INSERT INTO admin_login_logs (
+                            ip_hash,
+                            successful,
+                            reason,
+                            created_at
+                        )
+                        VALUES ($1, FALSE, 'blocked', NOW())
+                    `, [
+                        ipHash
+                    ]);
+
+                    return res.status(429).json({
+                        success: false,
+                        error:
+                            "IP temporarily blocked"
+                    });
+                }
+
+                return res.status(401).json({
                     success: false,
                     error: "Invalid code"
                 });
-        }
+            }
 
-        /* SUCCESSFUL LOGIN */
+            /* SUCCESSFUL LOGIN */
 
-        const session =
-            await createAdminSession();
+            const session =
+                await createAdminSession();
 
-        await pool.query(`
-            INSERT INTO admin_login_logs (
-                ip_hash,
-                successful,
-                reason,
-                created_at
-            )
-            VALUES ($1, TRUE, 'approved', NOW())
-        `, [
-            ipHash
-        ]);
+            await pool.query(`
+                INSERT INTO admin_login_logs (
+                    ip_hash,
+                    successful,
+                    reason,
+                    created_at
+                )
+                VALUES ($1, TRUE, 'approved', NOW())
+            `, [
+                ipHash
+            ]);
 
-        /* NEW APPROVED LOGIN STORE */
+            await pool.query(`
+                INSERT INTO admin_approved_logins (
+                    ip_hash,
+                    reason,
+                    session_id,
+                    created_at
+                )
+                VALUES ($1, 'valid_code', $2, NOW())
+            `, [
+                ipHash,
+                session.id
+            ]);
 
-        await pool.query(`
-            INSERT INTO admin_approved_logins (
-                ip_hash,
-                reason,
-                session_id,
-                created_at
-            )
-            VALUES ($1, 'valid_code', $2, NOW())
-        `, [
-            ipHash,
-            session.id
-        ]);
+            return res
+                .cookie(
+                    "corehub_admin",
+                    session.token,
+                    {
+                        httpOnly: true,
+                        secure: true,
+                        sameSite: "none",
+                        maxAge:
+                            8 * 60 * 60 * 1000,
+                        path: "/"
+                    }
+                )
+                .json({
+                    success: true,
+                    authenticated: true,
+                    admin: {
+                        role: "admin"
+                    }
+                });
+        } catch (error) {
+            console.error(
+                "Admin login error:",
+                error.message
+            );
 
-        res
-            .cookie(
-                "corehub_admin",
-                session.token,
-                {
-                    httpOnly: true,
-                    secure: true,
-                    sameSite: "none",
-                    maxAge: 8 * 60 * 60 * 1000,
-                    path: "/"
-                }
-            )
-            .json({
-                success: true,
-                authenticated: true,
-                admin: {
-                    role: "admin"
-                }
+            res.status(500).json({
+                success: false,
+                error: "Login failed"
             });
-
-    } catch (error) {
-        console.error(
-            "Admin login error:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            error: "Login failed"
-        });
+        }
     }
-});
+);
 
 /* =========================================================
    ADMIN ME
@@ -877,14 +1019,11 @@ app.post(
                 req.cookies.corehub_admin;
 
             if (token) {
-                const tokenHash =
-                    hashToken(token);
-
                 await pool.query(`
                     DELETE FROM admin_sessions
                     WHERE token_hash = $1
                 `, [
-                    tokenHash
+                    hashToken(token)
                 ]);
             }
 
@@ -901,8 +1040,12 @@ app.post(
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Logout error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Logout failed"
@@ -912,7 +1055,7 @@ app.post(
 );
 
 /* =========================================================
-   ADMIN SECURITY - ALL LOGIN LOGS
+   ADMIN SECURITY LOGS
 ========================================================= */
 
 app.get(
@@ -936,8 +1079,12 @@ app.get(
                 success: true,
                 logs: result.rows
             });
-
         } catch (error) {
+            console.error(
+                "Security logs error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 logs: []
@@ -947,7 +1094,7 @@ app.get(
 );
 
 /* =========================================================
-   ADMIN SECURITY - APPROVED LOGINS
+   APPROVED LOGINS
 ========================================================= */
 
 app.get(
@@ -967,19 +1114,26 @@ app.get(
                 LIMIT 200
             `);
 
-            const countResult = await pool.query(`
-                SELECT COUNT(*)::int AS count
-                FROM admin_approved_logins
-                WHERE created_at >= NOW() - INTERVAL '90 days'
-            `);
+            const countResult =
+                await pool.query(`
+                    SELECT COUNT(*)::int AS count
+                    FROM admin_approved_logins
+                    WHERE created_at >=
+                        NOW() - INTERVAL '90 days'
+                `);
 
             res.json({
                 success: true,
                 approved: result.rows,
-                count: countResult.rows[0].count
+                count:
+                    countResult.rows[0].count
             });
-
         } catch (error) {
+            console.error(
+                "Approved logins error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 approved: [],
@@ -990,7 +1144,7 @@ app.get(
 );
 
 /* =========================================================
-   ADMIN SECURITY - BLACKLIST
+   BLACKLIST
 ========================================================= */
 
 app.get(
@@ -1006,6 +1160,8 @@ app.get(
                     expires_at,
                     created_at
                 FROM admin_ip_blacklist
+                WHERE expires_at IS NULL
+                   OR expires_at > NOW()
                 ORDER BY created_at DESC
             `);
 
@@ -1013,8 +1169,12 @@ app.get(
                 success: true,
                 blacklist: result.rows
             });
-
         } catch (error) {
+            console.error(
+                "Blacklist error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 blacklist: []
@@ -1046,7 +1206,10 @@ app.post(
 
             minutes = Math.max(
                 1,
-                Math.min(minutes, 30 * 24 * 60)
+                Math.min(
+                    minutes,
+                    30 * 24 * 60
+                )
             );
 
             await pool.query(`
@@ -1059,7 +1222,8 @@ app.post(
                 VALUES (
                     $1,
                     $2,
-                    NOW() + ($3 * INTERVAL '1 minute'),
+                    NOW() +
+                        ($3 * INTERVAL '1 minute'),
                     NOW()
                 )
                 ON CONFLICT (ip_hash)
@@ -1075,8 +1239,12 @@ app.post(
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Manual blacklist error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to block IP"
@@ -1100,8 +1268,12 @@ app.delete(
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Unblock error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to unblock IP"
@@ -1120,7 +1292,14 @@ app.get(
     async (req, res) => {
         try {
             const result = await pool.query(`
-                SELECT *
+                SELECT
+                    id,
+                    url,
+                    name,
+                    status,
+                    game_id,
+                    category,
+                    created_at
                 FROM games
                 ORDER BY created_at DESC
             `);
@@ -1129,11 +1308,61 @@ app.get(
                 success: true,
                 games: result.rows
             });
-
         } catch (error) {
+            console.error(
+                "Admin games error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 games: []
+            });
+        }
+    }
+);
+
+app.get(
+    "/api/admin/games/:gameId",
+    requireAdmin,
+    async (req, res) => {
+        try {
+            const result = await pool.query(`
+                SELECT
+                    id,
+                    url,
+                    name,
+                    status,
+                    game_id,
+                    category,
+                    created_at
+                FROM games
+                WHERE game_id = $1
+                LIMIT 1
+            `, [
+                req.params.gameId
+            ]);
+
+            if (!result.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Game not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                game: result.rows[0]
+            });
+        } catch (error) {
+            console.error(
+                "Admin single game error:",
+                error.message
+            );
+
+            res.status(500).json({
+                success: false,
+                error: "Failed to load game"
             });
         }
     }
@@ -1148,15 +1377,15 @@ app.post(
                 gameId,
                 name,
                 url,
-                image,
                 category,
-                active = true
+                status
             } = req.body;
 
             if (!gameId || !name || !url) {
                 return res.status(400).json({
                     success: false,
-                    error: "gameId, name and url are required"
+                    error:
+                        "gameId, name and url are required"
                 });
             }
 
@@ -1165,26 +1394,35 @@ app.post(
                     game_id,
                     name,
                     url,
-                    image,
+                    status,
                     category,
-                    active,
                     created_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    NOW()
+                )
             `, [
                 gameId,
                 name,
                 url,
-                image || null,
-                category || null,
-                Boolean(active)
+                status || "online",
+                category || null
             ]);
 
-            res.json({
+            res.status(201).json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin create game error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to create game"
@@ -1201,36 +1439,42 @@ app.put(
             const {
                 name,
                 url,
-                image,
                 category,
-                active
+                status
             } = req.body;
 
-            await pool.query(`
+            const result = await pool.query(`
                 UPDATE games
                 SET
                     name = COALESCE($1, name),
                     url = COALESCE($2, url),
-                    image = COALESCE($3, image),
-                    category = COALESCE($4, category),
-                    active = COALESCE($5, active)
-                WHERE game_id = $6
+                    category = COALESCE($3, category),
+                    status = COALESCE($4, status)
+                WHERE game_id = $5
             `, [
-                name,
-                url,
-                image,
-                category,
-                typeof active === "boolean"
-                    ? active
-                    : null,
+                name || null,
+                url || null,
+                category || null,
+                status || null,
                 req.params.gameId
             ]);
+
+            if (!result.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Game not found"
+                });
+            }
 
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin update game error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to update game"
@@ -1244,18 +1488,29 @@ app.delete(
     requireAdmin,
     async (req, res) => {
         try {
-            await pool.query(`
+            const result = await pool.query(`
                 DELETE FROM games
                 WHERE game_id = $1
             `, [
                 req.params.gameId
             ]);
 
+            if (!result.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "Game not found"
+                });
+            }
+
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin delete game error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to delete game"
@@ -1274,7 +1529,14 @@ app.get(
     async (req, res) => {
         try {
             const result = await pool.query(`
-                SELECT *
+                SELECT
+                    id,
+                    type,
+                    title,
+                    content,
+                    featured,
+                    published,
+                    created_at
                 FROM news
                 ORDER BY created_at DESC
             `);
@@ -1283,8 +1545,12 @@ app.get(
                 success: true,
                 news: result.rows
             });
-
         } catch (error) {
+            console.error(
+                "Admin news error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 news: []
@@ -1299,34 +1565,55 @@ app.post(
     async (req, res) => {
         try {
             const {
+                type,
                 title,
-                content
+                content,
+                featured,
+                published
             } = req.body;
 
             if (!title || !content) {
                 return res.status(400).json({
                     success: false,
-                    error: "title and content are required"
+                    error:
+                        "title and content are required"
                 });
             }
 
             await pool.query(`
                 INSERT INTO news (
+                    type,
                     title,
                     content,
+                    featured,
+                    published,
                     created_at
                 )
-                VALUES ($1, $2, NOW())
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    NOW()
+                )
             `, [
+                type || "Update",
                 title,
-                content
+                content,
+                Boolean(featured),
+                published !== false
             ]);
 
-            res.json({
+            res.status(201).json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin create news error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to create news"
@@ -1341,27 +1628,51 @@ app.put(
     async (req, res) => {
         try {
             const {
-                title,
-                content
-            } = req.body;
-
-            await pool.query(`
-                UPDATE news
-                SET
-                    title = COALESCE($1, title),
-                    content = COALESCE($2, content)
-                WHERE id = $3
-            `, [
+                type,
                 title,
                 content,
+                featured,
+                published
+            } = req.body;
+
+            const result = await pool.query(`
+                UPDATE news
+                SET
+                    type = COALESCE($1, type),
+                    title = COALESCE($2, title),
+                    content = COALESCE($3, content),
+                    featured = COALESCE($4, featured),
+                    published = COALESCE($5, published)
+                WHERE id = $6
+            `, [
+                type || null,
+                title || null,
+                content || null,
+                typeof featured === "boolean"
+                    ? featured
+                    : null,
+                typeof published === "boolean"
+                    ? published
+                    : null,
                 req.params.id
             ]);
+
+            if (!result.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "News post not found"
+                });
+            }
 
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin update news error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to update news"
@@ -1375,18 +1686,29 @@ app.delete(
     requireAdmin,
     async (req, res) => {
         try {
-            await pool.query(`
+            const result = await pool.query(`
                 DELETE FROM news
                 WHERE id = $1
             `, [
                 req.params.id
             ]);
 
+            if (!result.rowCount) {
+                return res.status(404).json({
+                    success: false,
+                    error: "News post not found"
+                });
+            }
+
             res.json({
                 success: true
             });
-
         } catch (error) {
+            console.error(
+                "Admin delete news error:",
+                error.message
+            );
+
             res.status(500).json({
                 success: false,
                 error: "Failed to delete news"
@@ -1400,7 +1722,10 @@ app.delete(
 ========================================================= */
 
 app.use((err, req, res, next) => {
-    console.error(err);
+    console.error(
+        "Unhandled error:",
+        err.message
+    );
 
     res.status(500).json({
         success: false,
@@ -1417,3 +1742,4 @@ app.listen(PORT, () => {
         `Core Hub API running on port ${PORT}`
     );
 });
+
