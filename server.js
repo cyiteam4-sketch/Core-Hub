@@ -22,7 +22,25 @@ const RATE_LIMIT_MAX = 30;
 const ADMIN_ROUTE_PREFIX = "/api/admin";
 
 const ADMIN_SESSION_HOURS = 8;
+
 const ADMIN_COOKIE_NAME = "corehub_admin";
+
+const ADMIN_SECURITY_WINDOW_MINUTES = 15;
+const ADMIN_AUTO_BLOCK_MINUTES = 15;
+const ADMIN_AUTO_BLOCK_FAILED_ATTEMPTS = 5;
+
+// Secret used to create a stable IP fingerprint.
+// Set ADMIN_IP_SECRET in Render.
+const ADMIN_IP_SECRET =
+    process.env.ADMIN_IP_SECRET ||
+    process.env.ADMIN_LOGIN_CODE ||
+    "CHANGE_THIS_SECRET";
+
+// ============================================================
+// EXPRESS
+// ============================================================
+
+app.set("trust proxy", 1);
 
 // ============================================================
 // DATABASE
@@ -55,14 +73,10 @@ app.use(
     cors({
         origin: (origin, callback) => {
 
-            // Requests without Origin header
-            // are allowed for tools/server-to-server calls.
             if (!origin) {
                 return callback(null, true);
             }
 
-            // Temporary open mode.
-            // For production, set CORS_ORIGIN in Render.
             if (allowedOrigins.includes("*")) {
                 return callback(null, true);
             }
@@ -71,7 +85,9 @@ app.use(
                 return callback(null, true);
             }
 
-            return callback(new Error("CORS blocked"));
+            return callback(
+                new Error("CORS blocked")
+            );
         },
 
         credentials: true,
@@ -107,17 +123,8 @@ const rateLimits = new Map();
 
 function getClientKey(req) {
 
-    const forwarded =
-        req.headers["x-forwarded-for"];
-
-    if (forwarded) {
-
-        return String(forwarded)
-            .split(",")[0]
-            .trim();
-    }
-
     return (
+        req.ip ||
         req.socket.remoteAddress ||
         "unknown"
     );
@@ -160,7 +167,8 @@ function rateLimit(req, res, next) {
 
         return res.status(429).json({
             success: false,
-            error: "Too many requests"
+            error:
+                "Too many requests"
         });
     }
 
@@ -171,8 +179,6 @@ app.use(
     "/api",
     rateLimit
 );
-
-// Cleanup old rate-limit records.
 
 setInterval(() => {
 
@@ -257,16 +263,26 @@ function getCookie(req, name) {
         }
 
         const key =
-            cookie.slice(0, separator);
+            cookie.slice(
+                0,
+                separator
+            );
 
         const value =
-            cookie.slice(separator + 1);
+            cookie.slice(
+                separator + 1
+            );
 
         if (key === name) {
 
             try {
-                return decodeURIComponent(value);
+
+                return decodeURIComponent(
+                    value
+                );
+
             } catch {
+
                 return value;
             }
         }
@@ -275,13 +291,20 @@ function getCookie(req, name) {
     return null;
 }
 
-function timingSafeEqualString(a, b) {
+function timingSafeEqualString(
+    a,
+    b
+) {
 
     const aBuffer =
-        Buffer.from(String(a));
+        Buffer.from(
+            String(a)
+        );
 
     const bBuffer =
-        Buffer.from(String(b));
+        Buffer.from(
+            String(b)
+        );
 
     if (
         aBuffer.length !==
@@ -295,6 +318,28 @@ function timingSafeEqualString(a, b) {
         aBuffer,
         bBuffer
     );
+}
+
+function getRawClientIP(req) {
+
+    return String(
+        req.ip ||
+        req.socket.remoteAddress ||
+        "unknown"
+    );
+}
+
+function getIPFingerprint(req) {
+
+    return crypto
+        .createHmac(
+            "sha256",
+            ADMIN_IP_SECRET
+        )
+        .update(
+            getRawClientIP(req)
+        )
+        .digest("hex");
 }
 
 function sendServerError(
@@ -347,56 +392,8 @@ app.get(
 );
 
 // ============================================================
-// ROUTE MAP
-// ============================================================
-
-/*
-
-PUBLIC API
-----------
-
-GET    /api/health
-
-POST   /api/sessions
-POST   /api/sessions/heartbeat
-
-GET    /api/online
-GET    /api/online/games
-
-GET    /api/games
-GET    /api/games/:gameId
-POST   /api/games/:gameId/launch
-GET    /api/games/:gameId/stats
-
-GET    /api/trending
-
-GET    /api/news
-
-
-ADMIN API
----------
-
-POST   /api/admin/auth/login
-POST   /api/admin/auth/logout
-GET    /api/admin/auth/me
-
-GET    /api/admin/games
-POST   /api/admin/games
-PUT    /api/admin/games/:gameId
-DELETE /api/admin/games/:gameId
-
-GET    /api/admin/news
-POST   /api/admin/news
-PUT    /api/admin/news/:id
-DELETE /api/admin/news/:id
-
-*/
-
-// ============================================================
 // GUEST SESSIONS
 // ============================================================
-
-// CREATE GUEST SESSION
 
 app.post(
     "/api/sessions",
@@ -736,8 +733,6 @@ setInterval(
 // GAMES
 // ============================================================
 
-// GET ALL GAMES
-
 app.get(
     "/api/games",
     async (req, res) => {
@@ -778,8 +773,6 @@ app.get(
         }
     }
 );
-
-// GET ONE GAME
 
 app.get(
     "/api/games/:gameId",
@@ -989,7 +982,9 @@ app.get(
 
             const limit =
                 Math.min(
-                    Number.isFinite(requestedLimit)
+                    Number.isFinite(
+                        requestedLimit
+                    )
                         ? requestedLimit
                         : 10,
                     50
@@ -1053,8 +1048,6 @@ app.get(
 // NEWS
 // ============================================================
 
-// PUBLIC NEWS FEED
-
 app.get(
     "/api/news",
     async (req, res) => {
@@ -1069,7 +1062,9 @@ app.get(
 
             const limit =
                 Math.min(
-                    Number.isFinite(requestedLimit)
+                    Number.isFinite(
+                        requestedLimit
+                    )
                         ? requestedLimit
                         : 20,
                     50
@@ -1112,23 +1107,223 @@ app.get(
 );
 
 // ============================================================
-// ADMIN DATABASE TABLES
+// ADMIN TABLES
 // ============================================================
 
 async function ensureAdminTables() {
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS admin_sessions (
-            id SERIAL PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
             token_hash TEXT UNIQUE NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             expires_at TIMESTAMPTZ NOT NULL
         )
     `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_login_logs (
+            id BIGSERIAL PRIMARY KEY,
+            ip_hash TEXT NOT NULL,
+            successful BOOLEAN NOT NULL,
+            reason TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_ip_blacklist (
+            id BIGSERIAL PRIMARY KEY,
+            ip_hash TEXT UNIQUE NOT NULL,
+            reason TEXT,
+            expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS
+        admin_login_logs_ip_hash_idx
+        ON admin_login_logs(ip_hash)
+    `);
+
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS
+        admin_login_logs_created_at_idx
+        ON admin_login_logs(created_at)
+    `);
+
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS
+        admin_ip_blacklist_expires_at_idx
+        ON admin_ip_blacklist(expires_at)
+    `);
 }
 
 // ============================================================
-// ADMIN AUTHENTICATION
+// ADMIN SECURITY FUNCTIONS
+// ============================================================
+
+async function logAdminLogin(
+    ipHash,
+    successful,
+    reason
+) {
+
+    try {
+
+        await pool.query(
+            `
+            INSERT INTO admin_login_logs
+                (
+                    ip_hash,
+                    successful,
+                    reason
+                )
+            VALUES
+                (
+                    $1,
+                    $2,
+                    $3
+                )
+            `,
+            [
+                ipHash,
+                successful,
+                reason || null
+            ]
+        );
+
+    } catch (error) {
+
+        console.error(
+            "ADMIN LOGIN LOG ERROR:",
+            error
+        );
+    }
+}
+
+async function cleanupExpiredIPBlocks() {
+
+    try {
+
+        await pool.query(
+            `
+            DELETE FROM admin_ip_blacklist
+            WHERE expires_at IS NOT NULL
+              AND expires_at <= NOW()
+            `
+        );
+
+    } catch (error) {
+
+        console.error(
+            "IP BLOCK CLEANUP ERROR:",
+            error
+        );
+    }
+}
+
+async function getActiveIPBlock(
+    ipHash
+) {
+
+    const result =
+        await pool.query(
+            `
+            SELECT
+                id,
+                ip_hash,
+                reason,
+                expires_at
+            FROM admin_ip_blacklist
+            WHERE ip_hash = $1
+              AND (
+                    expires_at IS NULL
+                    OR expires_at > NOW()
+                  )
+            LIMIT 1
+            `,
+            [ipHash]
+        );
+
+    return (
+        result.rows[0] ||
+        null
+    );
+}
+
+async function getRecentFailures(
+    ipHash
+) {
+
+    const result =
+        await pool.query(
+            `
+            SELECT
+                COUNT(*)::int AS failures
+            FROM admin_login_logs
+            WHERE ip_hash = $1
+              AND successful = false
+              AND reason = 'invalid_code'
+              AND created_at >=
+                    NOW() -
+                    INTERVAL '${ADMIN_SECURITY_WINDOW_MINUTES} minutes'
+            `,
+            [ipHash]
+        );
+
+    return result.rows[0].failures;
+}
+
+async function autoBlockIfNeeded(
+    ipHash
+) {
+
+    const failures =
+        await getRecentFailures(
+            ipHash
+        );
+
+    if (
+        failures <
+        ADMIN_AUTO_BLOCK_FAILED_ATTEMPTS
+    ) {
+
+        return false;
+    }
+
+    await pool.query(
+        `
+        INSERT INTO admin_ip_blacklist
+            (
+                ip_hash,
+                reason,
+                expires_at
+            )
+        VALUES
+            (
+                $1,
+                $2,
+                NOW() +
+                INTERVAL '${ADMIN_AUTO_BLOCK_MINUTES} minutes'
+            )
+        ON CONFLICT (ip_hash)
+        DO UPDATE SET
+            reason = EXCLUDED.reason,
+            expires_at = EXCLUDED.expires_at
+        `,
+        [
+            ipHash,
+            `Automatic block after ${ADMIN_AUTO_BLOCK_FAILED_ATTEMPTS} failed login attempts`
+        ]
+    );
+
+    return true;
+}
+
+// ============================================================
+// REQUIRE ADMIN
 // ============================================================
 
 async function requireAdmin(
@@ -1213,7 +1408,36 @@ app.post(
     `${ADMIN_ROUTE_PREFIX}/auth/login`,
     async (req, res) => {
 
+        const ipHash =
+            getIPFingerprint(req);
+
         try {
+
+            await cleanupExpiredIPBlocks();
+
+            // CHECK IP BLOCK FIRST
+
+            const blocked =
+                await getActiveIPBlock(
+                    ipHash
+                );
+
+            if (blocked) {
+
+                await logAdminLogin(
+                    ipHash,
+                    false,
+                    "blocked"
+                );
+
+                return res.status(429).json({
+                    success: false,
+                    error:
+                        "This IP is temporarily blocked from admin login.",
+                    expiresAt:
+                        blocked.expires_at
+                });
+            }
 
             const submittedCode =
                 String(
@@ -1227,6 +1451,12 @@ app.post(
 
             if (!configuredCode) {
 
+                await logAdminLogin(
+                    ipHash,
+                    false,
+                    "not_configured"
+                );
+
                 return res.status(500).json({
                     success: false,
                     error:
@@ -1236,12 +1466,20 @@ app.post(
 
             if (!submittedCode) {
 
+                await logAdminLogin(
+                    ipHash,
+                    false,
+                    "missing_code"
+                );
+
                 return res.status(400).json({
                     success: false,
                     error:
                         "Admin login code required"
                 });
             }
+
+            // CHECK ADMIN CODE
 
             if (
                 !timingSafeEqualString(
@@ -1250,6 +1488,26 @@ app.post(
                 )
             ) {
 
+                await logAdminLogin(
+                    ipHash,
+                    false,
+                    "invalid_code"
+                );
+
+                const blockedNow =
+                    await autoBlockIfNeeded(
+                        ipHash
+                    );
+
+                if (blockedNow) {
+
+                    return res.status(429).json({
+                        success: false,
+                        error:
+                            "Too many failed admin login attempts. This IP is temporarily blocked."
+                    });
+                }
+
                 return res.status(401).json({
                     success: false,
                     error:
@@ -1257,16 +1515,7 @@ app.post(
                 });
             }
 
-            // Remove expired sessions first.
-
-            await pool.query(
-                `
-                DELETE FROM admin_sessions
-                WHERE expires_at <= NOW()
-                `
-            );
-
-            // Create a fresh random session token.
+            // SUCCESSFUL LOGIN
 
             const sessionToken =
                 createToken(48);
@@ -1293,9 +1542,11 @@ app.post(
                 [sessionHash]
             );
 
-            // Cookie belongs to Render's domain.
-            // HttpOnly prevents normal frontend JS
-            // from reading the token.
+            await logAdminLogin(
+                ipHash,
+                true,
+                "success"
+            );
 
             res.setHeader(
                 "Set-Cookie",
@@ -1322,6 +1573,12 @@ app.post(
                 error
             );
 
+            await logAdminLogin(
+                ipHash,
+                false,
+                "server_error"
+            );
+
             sendServerError(
                 res,
                 "Admin login failed"
@@ -1331,7 +1588,7 @@ app.post(
 );
 
 // ============================================================
-// ADMIN CHECK
+// ADMIN SESSION CHECK
 // ============================================================
 
 app.get(
@@ -1373,7 +1630,9 @@ app.post(
                     DELETE FROM admin_sessions
                     WHERE token_hash = $1
                     `,
-                    [hashToken(token)]
+                    [
+                        hashToken(token)
+                    ]
                 );
             }
 
@@ -1411,10 +1670,294 @@ app.post(
 );
 
 // ============================================================
-// ADMIN GAMES
+// ADMIN SECURITY LOGS
 // ============================================================
 
-// GET GAMES
+app.get(
+    `${ADMIN_ROUTE_PREFIX}/security/logins`,
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const requestedLimit =
+                Number.parseInt(
+                    req.query.limit,
+                    10
+                );
+
+            const limit =
+                Math.min(
+                    Number.isFinite(
+                        requestedLimit
+                    )
+                        ? requestedLimit
+                        : 50,
+                    100
+                );
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        id,
+                        ip_hash,
+                        successful,
+                        reason,
+                        created_at
+                    FROM admin_login_logs
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    `,
+                    [limit]
+                );
+
+            res.json({
+                success: true,
+                logs:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "SECURITY LOG ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not load security logs"
+            );
+        }
+    }
+);
+
+// ============================================================
+// ADMIN BLACKLIST — GET
+// ============================================================
+
+app.get(
+    `${ADMIN_ROUTE_PREFIX}/security/blacklist`,
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            await cleanupExpiredIPBlocks();
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        id,
+                        ip_hash,
+                        reason,
+                        expires_at,
+                        created_at
+                    FROM admin_ip_blacklist
+                    ORDER BY created_at DESC
+                    `
+                );
+
+            res.json({
+                success: true,
+                blacklist:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "BLACKLIST GET ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not load blacklist"
+            );
+        }
+    }
+);
+
+// ============================================================
+// ADMIN BLACKLIST — MANUAL BLOCK
+// ============================================================
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/security/blacklist`,
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const ipHash =
+                String(
+                    req.body?.ip_hash || ""
+                ).trim();
+
+            const requestedMinutes =
+                Number.parseInt(
+                    req.body?.minutes,
+                    10
+                );
+
+            const minutes =
+                Math.min(
+                    Math.max(
+                        Number.isFinite(
+                            requestedMinutes
+                        )
+                            ? requestedMinutes
+                            : 60,
+                        1
+                    ),
+                    43_200
+                );
+
+            const reason =
+                String(
+                    req.body?.reason ||
+                    "Manually blocked by admin"
+                ).trim();
+
+            if (
+                !/^[a-f0-9]{64}$/i.test(
+                    ipHash
+                )
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "Invalid IP fingerprint"
+                });
+            }
+
+            await pool.query(
+                `
+                INSERT INTO admin_ip_blacklist
+                    (
+                        ip_hash,
+                        reason,
+                        expires_at
+                    )
+                VALUES
+                    (
+                        $1,
+                        $2,
+                        NOW() +
+                        ($3 * INTERVAL '1 minute')
+                    )
+                ON CONFLICT (ip_hash)
+                DO UPDATE SET
+                    reason = EXCLUDED.reason,
+                    expires_at = EXCLUDED.expires_at
+                `,
+                [
+                    ipHash,
+                    reason,
+                    minutes
+                ]
+            );
+
+            res.json({
+                success: true,
+                message:
+                    "IP fingerprint blocked",
+                minutes
+            });
+
+        } catch (error) {
+
+            console.error(
+                "BLACKLIST CREATE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not blacklist fingerprint"
+            );
+        }
+    }
+);
+
+// ============================================================
+// ADMIN BLACKLIST — UNBLOCK
+// ============================================================
+
+app.delete(
+    `${ADMIN_ROUTE_PREFIX}/security/blacklist/:ipHash`,
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const ipHash =
+                String(
+                    req.params.ipHash || ""
+                ).trim();
+
+            if (
+                !/^[a-f0-9]{64}$/i.test(
+                    ipHash
+                )
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "Invalid IP fingerprint"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    DELETE FROM admin_ip_blacklist
+                    WHERE ip_hash = $1
+                    RETURNING ip_hash
+                    `,
+                    [ipHash]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "Fingerprint is not blacklisted"
+                });
+            }
+
+            res.json({
+                success: true,
+                message:
+                    "IP fingerprint unblocked"
+            });
+
+        } catch (error) {
+
+            console.error(
+                "BLACKLIST DELETE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not unblock fingerprint"
+            );
+        }
+    }
+);
+
+// ============================================================
+// ADMIN GAMES
+// ============================================================
 
 app.get(
     `${ADMIN_ROUTE_PREFIX}/games`,
@@ -1457,8 +2000,6 @@ app.get(
         }
     }
 );
-
-// CREATE GAME
 
 app.post(
     `${ADMIN_ROUTE_PREFIX}/games`,
@@ -1562,8 +2103,6 @@ app.post(
     }
 );
 
-// UPDATE GAME
-
 app.put(
     `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
     requireAdmin,
@@ -1662,8 +2201,6 @@ app.put(
     }
 );
 
-// DELETE GAME
-
 app.delete(
     `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
     requireAdmin,
@@ -1717,8 +2254,6 @@ app.delete(
 // ADMIN NEWS
 // ============================================================
 
-// GET NEWS
-
 app.get(
     `${ADMIN_ROUTE_PREFIX}/news`,
     requireAdmin,
@@ -1759,8 +2294,6 @@ app.get(
         }
     }
 );
-
-// CREATE NEWS
 
 app.post(
     `${ADMIN_ROUTE_PREFIX}/news`,
@@ -1838,8 +2371,6 @@ app.post(
         }
     }
 );
-
-// UPDATE NEWS
 
 app.put(
     `${ADMIN_ROUTE_PREFIX}/news/:id`,
@@ -1923,8 +2454,6 @@ app.put(
     }
 );
 
-// DELETE NEWS
-
 app.delete(
     `${ADMIN_ROUTE_PREFIX}/news/:id`,
     requireAdmin,
@@ -1975,12 +2504,14 @@ app.delete(
 );
 
 // ============================================================
-// CLEANUP EXPIRED ADMIN SESSIONS
+// CLEANUP ADMIN DATA
 // ============================================================
 
-async function cleanupAdminSessions() {
+async function cleanupAdminData() {
 
     try {
+
+        await cleanupExpiredIPBlocks();
 
         await pool.query(
             `
@@ -1989,18 +2520,28 @@ async function cleanupAdminSessions() {
             `
         );
 
+        // Keep login logs for 90 days.
+
+        await pool.query(
+            `
+            DELETE FROM admin_login_logs
+            WHERE created_at <
+                NOW() - INTERVAL '90 days'
+            `
+        );
+
     } catch (error) {
 
         console.error(
-            "ADMIN SESSION CLEANUP ERROR:",
+            "ADMIN CLEANUP ERROR:",
             error
         );
     }
 }
 
 setInterval(
-    cleanupAdminSessions,
-    60_000
+    cleanupAdminData,
+    60 * 60 * 1000
 );
 
 // ============================================================
@@ -2064,9 +2605,7 @@ async function startServer() {
 
         await ensureAdminTables();
 
-        console.log(
-            "Database connection successful."
-        );
+        await cleanupAdminData();
 
         const server =
             app.listen(
@@ -2079,11 +2618,15 @@ async function startServer() {
                     );
 
                     console.log(
-                        `Public API ready at port ${PORT}`
+                        "Public API ready."
                     );
 
                     console.log(
-                        `Admin API ready at ${ADMIN_ROUTE_PREFIX}`
+                        "Admin API ready."
+                    );
+
+                    console.log(
+                        "Admin security logging enabled."
                     );
                 }
             );
@@ -2098,28 +2641,30 @@ async function startServer() {
                 `${signal} received. Shutting down...`
             );
 
-            server.close(async () => {
+            server.close(
+                async () => {
 
-                try {
+                    try {
 
-                    await pool.end();
+                        await pool.end();
 
-                    console.log(
-                        "Database pool closed."
-                    );
+                        console.log(
+                            "Database pool closed."
+                        );
 
-                    process.exit(0);
+                        process.exit(0);
 
-                } catch (error) {
+                    } catch (error) {
 
-                    console.error(
-                        "SHUTDOWN ERROR:",
-                        error
-                    );
+                        console.error(
+                            "SHUTDOWN ERROR:",
+                            error
+                        );
 
-                    process.exit(1);
+                        process.exit(1);
+                    }
                 }
-            });
+            );
         }
 
         process.on(
