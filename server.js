@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -19,6 +20,9 @@ const RATE_LIMIT_WINDOW_MS = 10_000;
 const RATE_LIMIT_MAX = 30;
 
 const ADMIN_ROUTE_PREFIX = "/api/admin";
+
+const ADMIN_SESSION_HOURS = 8;
+const ADMIN_COOKIE_NAME = "corehub_admin";
 
 // ============================================================
 // DATABASE
@@ -51,14 +55,14 @@ app.use(
     cors({
         origin: (origin, callback) => {
 
-            // Requests without an Origin header
+            // Requests without Origin header
             // are allowed for tools/server-to-server calls.
             if (!origin) {
                 return callback(null, true);
             }
 
-            // Temporary open CORS mode.
-            // Set CORS_ORIGIN later for production lockdown.
+            // Temporary open mode.
+            // For production, set CORS_ORIGIN in Render.
             if (allowedOrigins.includes("*")) {
                 return callback(null, true);
             }
@@ -69,6 +73,8 @@ app.use(
 
             return callback(new Error("CORS blocked"));
         },
+
+        credentials: true,
 
         methods: [
             "GET",
@@ -201,10 +207,10 @@ function hashToken(token) {
         .digest("hex");
 }
 
-function createToken() {
+function createToken(bytes = 32) {
 
     return crypto
-        .randomBytes(32)
+        .randomBytes(bytes)
         .toString("hex");
 }
 
@@ -229,6 +235,66 @@ function getBearerToken(req) {
             .trim();
 
     return token || null;
+}
+
+function getCookie(req, name) {
+
+    const cookieHeader =
+        req.headers.cookie || "";
+
+    const cookies =
+        cookieHeader
+            .split(";")
+            .map(item => item.trim());
+
+    for (const cookie of cookies) {
+
+        const separator =
+            cookie.indexOf("=");
+
+        if (separator === -1) {
+            continue;
+        }
+
+        const key =
+            cookie.slice(0, separator);
+
+        const value =
+            cookie.slice(separator + 1);
+
+        if (key === name) {
+
+            try {
+                return decodeURIComponent(value);
+            } catch {
+                return value;
+            }
+        }
+    }
+
+    return null;
+}
+
+function timingSafeEqualString(a, b) {
+
+    const aBuffer =
+        Buffer.from(String(a));
+
+    const bBuffer =
+        Buffer.from(String(b));
+
+    if (
+        aBuffer.length !==
+        bBuffer.length
+    ) {
+
+        return false;
+    }
+
+    return crypto.timingSafeEqual(
+        aBuffer,
+        bBuffer
+    );
 }
 
 function sendServerError(
@@ -307,8 +373,8 @@ GET    /api/trending
 GET    /api/news
 
 
-FUTURE ADMIN API
-----------------
+ADMIN API
+---------
 
 POST   /api/admin/auth/login
 POST   /api/admin/auth/logout
@@ -323,9 +389,6 @@ GET    /api/admin/news
 POST   /api/admin/news
 PUT    /api/admin/news/:id
 DELETE /api/admin/news/:id
-
-These routes are reserved now so the
-admin panel can be added cleanly later.
 
 */
 
@@ -991,9 +1054,6 @@ app.get(
 // ============================================================
 
 // PUBLIC NEWS FEED
-//
-// This is the endpoint the public
-// Core Hub Games News page will use.
 
 app.get(
     "/api/news",
@@ -1052,160 +1112,895 @@ app.get(
 );
 
 // ============================================================
-// FUTURE ADMIN AUTH
+// ADMIN DATABASE TABLES
 // ============================================================
-//
-// Reserved for the separate admin panel.
-//
-// Planned:
-// POST /api/admin/auth/login
-// POST /api/admin/auth/logout
-// GET  /api/admin/auth/me
-//
-// The actual admin authentication should be
-// implemented server-side before these routes
-// are used in production.
-//
+
+async function ensureAdminTables() {
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            id SERIAL PRIMARY KEY,
+            token_hash TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ NOT NULL
+        )
+    `);
+}
+
+// ============================================================
+// ADMIN AUTHENTICATION
+// ============================================================
+
+async function requireAdmin(
+    req,
+    res,
+    next
+) {
+
+    try {
+
+        const token =
+            getCookie(
+                req,
+                ADMIN_COOKIE_NAME
+            );
+
+        if (!token) {
+
+            return res.status(401).json({
+                success: false,
+                error:
+                    "Admin authentication required"
+            });
+        }
+
+        const tokenHash =
+            hashToken(token);
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    expires_at
+                FROM admin_sessions
+                WHERE token_hash = $1
+                  AND expires_at > NOW()
+                LIMIT 1
+                `,
+                [tokenHash]
+            );
+
+        if (
+            result.rows.length === 0
+        ) {
+
+            return res.status(401).json({
+                success: false,
+                error:
+                    "Admin session expired or invalid"
+            });
+        }
+
+        req.admin = {
+            id:
+                result.rows[0].id,
+            role:
+                "admin"
+        };
+
+        next();
+
+    } catch (error) {
+
+        console.error(
+            "ADMIN AUTH ERROR:",
+            error
+        );
+
+        sendServerError(
+            res,
+            "Admin authentication failed"
+        );
+    }
+}
+
+// ============================================================
+// ADMIN LOGIN
 // ============================================================
 
 app.post(
     `${ADMIN_ROUTE_PREFIX}/auth/login`,
-    (req, res) => {
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin authentication is not enabled yet"
-        });
+        try {
+
+            const submittedCode =
+                String(
+                    req.body?.code || ""
+                );
+
+            const configuredCode =
+                String(
+                    process.env.ADMIN_LOGIN_CODE || ""
+                );
+
+            if (!configuredCode) {
+
+                return res.status(500).json({
+                    success: false,
+                    error:
+                        "Admin login is not configured"
+                });
+            }
+
+            if (!submittedCode) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "Admin login code required"
+                });
+            }
+
+            if (
+                !timingSafeEqualString(
+                    submittedCode,
+                    configuredCode
+                )
+            ) {
+
+                return res.status(401).json({
+                    success: false,
+                    error:
+                        "Invalid admin login code"
+                });
+            }
+
+            // Remove expired sessions first.
+
+            await pool.query(
+                `
+                DELETE FROM admin_sessions
+                WHERE expires_at <= NOW()
+                `
+            );
+
+            // Create a fresh random session token.
+
+            const sessionToken =
+                createToken(48);
+
+            const sessionHash =
+                hashToken(
+                    sessionToken
+                );
+
+            await pool.query(
+                `
+                INSERT INTO admin_sessions
+                    (
+                        token_hash,
+                        expires_at
+                    )
+                VALUES
+                    (
+                        $1,
+                        NOW() +
+                        INTERVAL '${ADMIN_SESSION_HOURS} hours'
+                    )
+                `,
+                [sessionHash]
+            );
+
+            // Cookie belongs to Render's domain.
+            // HttpOnly prevents normal frontend JS
+            // from reading the token.
+
+            res.setHeader(
+                "Set-Cookie",
+                [
+                    `${ADMIN_COOKIE_NAME}=${encodeURIComponent(sessionToken)}`,
+                    "Path=/",
+                    "HttpOnly",
+                    "Secure",
+                    "SameSite=None",
+                    `Max-Age=${ADMIN_SESSION_HOURS * 60 * 60}`
+                ].join("; ")
+            );
+
+            res.json({
+                success: true,
+                message:
+                    "Admin login successful"
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN LOGIN ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Admin login failed"
+            );
+        }
     }
 );
 
-app.post(
-    `${ADMIN_ROUTE_PREFIX}/auth/logout`,
-    (req, res) => {
-
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin authentication is not enabled yet"
-        });
-    }
-);
+// ============================================================
+// ADMIN CHECK
+// ============================================================
 
 app.get(
     `${ADMIN_ROUTE_PREFIX}/auth/me`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin authentication is not enabled yet"
+        res.json({
+            success: true,
+            authenticated: true,
+            admin: {
+                role: "admin"
+            }
         });
     }
 );
 
 // ============================================================
-// FUTURE ADMIN GAMES
+// ADMIN LOGOUT
 // ============================================================
+
+app.post(
+    `${ADMIN_ROUTE_PREFIX}/auth/logout`,
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const token =
+                getCookie(
+                    req,
+                    ADMIN_COOKIE_NAME
+                );
+
+            if (token) {
+
+                await pool.query(
+                    `
+                    DELETE FROM admin_sessions
+                    WHERE token_hash = $1
+                    `,
+                    [hashToken(token)]
+                );
+            }
+
+            res.setHeader(
+                "Set-Cookie",
+                [
+                    `${ADMIN_COOKIE_NAME}=`,
+                    "Path=/",
+                    "HttpOnly",
+                    "Secure",
+                    "SameSite=None",
+                    "Max-Age=0"
+                ].join("; ")
+            );
+
+            res.json({
+                success: true,
+                message:
+                    "Admin logged out"
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN LOGOUT ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Logout failed"
+            );
+        }
+    }
+);
+
+// ============================================================
+// ADMIN GAMES
+// ============================================================
+
+// GET GAMES
 
 app.get(
     `${ADMIN_ROUTE_PREFIX}/games`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin games API is not enabled yet"
-        });
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        game_id,
+                        name,
+                        category,
+                        url,
+                        status
+                    FROM games
+                    ORDER BY id DESC
+                    `
+                );
+
+            res.json({
+                success: true,
+                games:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN GAMES GET ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Database error"
+            );
+        }
     }
 );
+
+// CREATE GAME
 
 app.post(
     `${ADMIN_ROUTE_PREFIX}/games`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin games API is not enabled yet"
-        });
+        try {
+
+            const gameId =
+                String(
+                    req.body?.game_id || ""
+                ).trim();
+
+            const name =
+                String(
+                    req.body?.name || ""
+                ).trim();
+
+            const category =
+                String(
+                    req.body?.category || ""
+                ).trim();
+
+            const url =
+                String(
+                    req.body?.url || ""
+                ).trim();
+
+            const status =
+                String(
+                    req.body?.status || "online"
+                ).trim();
+
+            if (
+                !gameId ||
+                !name ||
+                !category ||
+                !url
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "game_id, name, category and url are required"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    INSERT INTO games
+                        (
+                            game_id,
+                            name,
+                            category,
+                            url,
+                            status
+                        )
+                    VALUES
+                        (
+                            $1,
+                            $2,
+                            $3,
+                            $4,
+                            $5
+                        )
+                    RETURNING
+                        game_id,
+                        name,
+                        category,
+                        url,
+                        status
+                    `,
+                    [
+                        gameId,
+                        name,
+                        category,
+                        url,
+                        status
+                    ]
+                );
+
+            res.status(201).json({
+                success: true,
+                game:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN GAME CREATE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not create game"
+            );
+        }
     }
 );
+
+// UPDATE GAME
 
 app.put(
     `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin games API is not enabled yet"
-        });
+        try {
+
+            const name =
+                String(
+                    req.body?.name || ""
+                ).trim();
+
+            const category =
+                String(
+                    req.body?.category || ""
+                ).trim();
+
+            const url =
+                String(
+                    req.body?.url || ""
+                ).trim();
+
+            const status =
+                String(
+                    req.body?.status || "online"
+                ).trim();
+
+            if (
+                !name ||
+                !category ||
+                !url
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "name, category and url are required"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    UPDATE games
+                    SET
+                        name = $1,
+                        category = $2,
+                        url = $3,
+                        status = $4
+                    WHERE game_id = $5
+                    RETURNING
+                        game_id,
+                        name,
+                        category,
+                        url,
+                        status
+                    `,
+                    [
+                        name,
+                        category,
+                        url,
+                        status,
+                        req.params.gameId
+                    ]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "Game not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                game:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN GAME UPDATE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not update game"
+            );
+        }
     }
 );
+
+// DELETE GAME
 
 app.delete(
     `${ADMIN_ROUTE_PREFIX}/games/:gameId`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin games API is not enabled yet"
-        });
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    DELETE FROM games
+                    WHERE game_id = $1
+                    RETURNING game_id
+                    `,
+                    [req.params.gameId]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "Game not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                message:
+                    "Game deleted"
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN GAME DELETE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not delete game"
+            );
+        }
     }
 );
 
 // ============================================================
-// FUTURE ADMIN NEWS
+// ADMIN NEWS
 // ============================================================
+
+// GET NEWS
 
 app.get(
     `${ADMIN_ROUTE_PREFIX}/news`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin news API is not enabled yet"
-        });
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    SELECT
+                        id,
+                        title,
+                        content,
+                        created_at
+                    FROM news
+                    ORDER BY created_at DESC
+                    `
+                );
+
+            res.json({
+                success: true,
+                news:
+                    result.rows
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN NEWS GET ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Database error"
+            );
+        }
     }
 );
+
+// CREATE NEWS
 
 app.post(
     `${ADMIN_ROUTE_PREFIX}/news`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin news API is not enabled yet"
-        });
+        try {
+
+            const title =
+                String(
+                    req.body?.title || ""
+                ).trim();
+
+            const content =
+                String(
+                    req.body?.content || ""
+                ).trim();
+
+            if (
+                !title ||
+                !content
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "title and content are required"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    INSERT INTO news
+                        (
+                            title,
+                            content,
+                            created_at
+                        )
+                    VALUES
+                        (
+                            $1,
+                            $2,
+                            NOW()
+                        )
+                    RETURNING
+                        id,
+                        title,
+                        content,
+                        created_at
+                    `,
+                    [
+                        title,
+                        content
+                    ]
+                );
+
+            res.status(201).json({
+                success: true,
+                news:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN NEWS CREATE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not create news"
+            );
+        }
     }
 );
+
+// UPDATE NEWS
 
 app.put(
     `${ADMIN_ROUTE_PREFIX}/news/:id`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin news API is not enabled yet"
-        });
+        try {
+
+            const title =
+                String(
+                    req.body?.title || ""
+                ).trim();
+
+            const content =
+                String(
+                    req.body?.content || ""
+                ).trim();
+
+            if (
+                !title ||
+                !content
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    error:
+                        "title and content are required"
+                });
+            }
+
+            const result =
+                await pool.query(
+                    `
+                    UPDATE news
+                    SET
+                        title = $1,
+                        content = $2
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        title,
+                        content,
+                        created_at
+                    `,
+                    [
+                        title,
+                        content,
+                        req.params.id
+                    ]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "News article not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                news:
+                    result.rows[0]
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN NEWS UPDATE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not update news"
+            );
+        }
     }
 );
 
+// DELETE NEWS
+
 app.delete(
     `${ADMIN_ROUTE_PREFIX}/news/:id`,
-    (req, res) => {
+    requireAdmin,
+    async (req, res) => {
 
-        res.status(501).json({
-            success: false,
-            error:
-                "Admin news API is not enabled yet"
-        });
+        try {
+
+            const result =
+                await pool.query(
+                    `
+                    DELETE FROM news
+                    WHERE id = $1
+                    RETURNING id
+                    `,
+                    [req.params.id]
+                );
+
+            if (
+                result.rows.length === 0
+            ) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "News article not found"
+                });
+            }
+
+            res.json({
+                success: true,
+                message:
+                    "News article deleted"
+            });
+
+        } catch (error) {
+
+            console.error(
+                "ADMIN NEWS DELETE ERROR:",
+                error
+            );
+
+            sendServerError(
+                res,
+                "Could not delete news"
+            );
+        }
     }
+);
+
+// ============================================================
+// CLEANUP EXPIRED ADMIN SESSIONS
+// ============================================================
+
+async function cleanupAdminSessions() {
+
+    try {
+
+        await pool.query(
+            `
+            DELETE FROM admin_sessions
+            WHERE expires_at <= NOW()
+            `
+        );
+
+    } catch (error) {
+
+        console.error(
+            "ADMIN SESSION CLEANUP ERROR:",
+            error
+        );
+    }
+}
+
+setInterval(
+    cleanupAdminSessions,
+    60_000
 );
 
 // ============================================================
@@ -1235,6 +2030,18 @@ app.use(
             error
         );
 
+        if (
+            error.message ===
+            "CORS blocked"
+        ) {
+
+            return res.status(403).json({
+                success: false,
+                error:
+                    "CORS blocked"
+            });
+        }
+
         res.status(500).json({
             success: false,
             error:
@@ -1247,66 +2054,94 @@ app.use(
 // START SERVER
 // ============================================================
 
-const server =
-    app.listen(
-        PORT,
-        "0.0.0.0",
-        () => {
+async function startServer() {
 
-            console.log(
-                `Core Hub API running on port ${PORT}`
+    try {
+
+        await pool.query(
+            "SELECT 1"
+        );
+
+        await ensureAdminTables();
+
+        console.log(
+            "Database connection successful."
+        );
+
+        const server =
+            app.listen(
+                PORT,
+                "0.0.0.0",
+                () => {
+
+                    console.log(
+                        `Core Hub API running on port ${PORT}`
+                    );
+
+                    console.log(
+                        `Public API ready at port ${PORT}`
+                    );
+
+                    console.log(
+                        `Admin API ready at ${ADMIN_ROUTE_PREFIX}`
+                    );
+                }
             );
 
-            console.log(
-                `Public API ready at port ${PORT}`
-            );
+        // ====================================================
+        // GRACEFUL SHUTDOWN
+        // ====================================================
+
+        async function shutdown(signal) {
 
             console.log(
-                `Future admin API reserved at ${ADMIN_ROUTE_PREFIX}`
+                `${signal} received. Shutting down...`
             );
+
+            server.close(async () => {
+
+                try {
+
+                    await pool.end();
+
+                    console.log(
+                        "Database pool closed."
+                    );
+
+                    process.exit(0);
+
+                } catch (error) {
+
+                    console.error(
+                        "SHUTDOWN ERROR:",
+                        error
+                    );
+
+                    process.exit(1);
+                }
+            });
         }
-    );
 
-// ============================================================
-// GRACEFUL SHUTDOWN
-// ============================================================
+        process.on(
+            "SIGTERM",
+            () => shutdown("SIGTERM")
+        );
 
-async function shutdown(signal) {
+        process.on(
+            "SIGINT",
+            () => shutdown("SIGINT")
+        );
 
-    console.log(
-        `${signal} received. Shutting down...`
-    );
+    } catch (error) {
 
-    server.close(async () => {
+        console.error(
+            "STARTUP ERROR:",
+            error
+        );
 
-        try {
-
-            await pool.end();
-
-            console.log(
-                "Database pool closed."
-            );
-
-            process.exit(0);
-
-        } catch (error) {
-
-            console.error(
-                "SHUTDOWN ERROR:",
-                error
-            );
-
-            process.exit(1);
-        }
-    });
+        process.exit(1);
+    }
 }
 
-process.on(
-    "SIGTERM",
-    () => shutdown("SIGTERM")
-);
+startServer();
 
-process.on(
-    "SIGINT",
-    () => shutdown("SIGINT")
-);
