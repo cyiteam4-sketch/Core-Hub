@@ -4,6 +4,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
+const net = require("net");
 const { Pool } = require("pg");
 
 const app = express();
@@ -22,15 +23,14 @@ const RATE_LIMIT_MAX = 30;
 const ADMIN_ROUTE_PREFIX = "/api/admin";
 
 const ADMIN_SESSION_HOURS = 8;
-
 const ADMIN_COOKIE_NAME = "corehub_admin";
 
 const ADMIN_SECURITY_WINDOW_MINUTES = 15;
 const ADMIN_AUTO_BLOCK_MINUTES = 15;
 const ADMIN_AUTO_BLOCK_FAILED_ATTEMPTS = 5;
 
-// Secret used to create a stable IP fingerprint.
-// Set ADMIN_IP_SECRET in Render.
+// Secret used to create stable IP fingerprints.
+// ADD ADMIN_IP_SECRET TO RENDER.
 const ADMIN_IP_SECRET =
     process.env.ADMIN_IP_SECRET ||
     process.env.ADMIN_LOGIN_CODE ||
@@ -61,7 +61,7 @@ const pool = new Pool({
 });
 
 // ============================================================
-// MIDDLEWARE
+// CORS
 // ============================================================
 
 const allowedOrigins = (process.env.CORS_ORIGIN || "*")
@@ -116,6 +116,86 @@ app.use(
 );
 
 // ============================================================
+// CLIENT IP
+// ============================================================
+
+function getClientIP(req) {
+
+    // Cloudflare supplies the original client IP.
+    // Prefer this over req.ip because Render sits behind
+    // proxy/load-balancer infrastructure.
+
+    const cloudflareIP =
+        req.headers["cf-connecting-ip"];
+
+    if (
+        typeof cloudflareIP === "string" &&
+        net.isIP(cloudflareIP.trim())
+    ) {
+
+        return normalizeIP(
+            cloudflareIP.trim()
+        );
+    }
+
+    // Fallback to X-Forwarded-For.
+
+    const forwarded =
+        req.headers["x-forwarded-for"];
+
+    if (
+        typeof forwarded === "string" &&
+        forwarded.trim()
+    ) {
+
+        const firstIP =
+            forwarded
+                .split(",")[0]
+                .trim();
+
+        if (net.isIP(firstIP)) {
+
+            return normalizeIP(
+                firstIP
+            );
+        }
+    }
+
+    // Final fallback.
+
+    return normalizeIP(
+        req.socket.remoteAddress ||
+        "unknown"
+    );
+}
+
+function normalizeIP(ip) {
+
+    let value =
+        String(ip)
+            .trim()
+            .toLowerCase();
+
+    // IPv4-mapped IPv6:
+    // ::ffff:192.168.1.10
+    // becomes:
+    // 192.168.1.10
+
+    if (
+        value.startsWith("::ffff:") &&
+        net.isIP(
+            value.slice(7)
+        ) === 4
+    ) {
+
+        value =
+            value.slice(7);
+    }
+
+    return value;
+}
+
+// ============================================================
 // RATE LIMITER
 // ============================================================
 
@@ -123,11 +203,7 @@ const rateLimits = new Map();
 
 function getClientKey(req) {
 
-    return (
-        req.ip ||
-        req.socket.remoteAddress ||
-        "unknown"
-    );
+    return getClientIP(req);
 }
 
 function rateLimit(req, res, next) {
@@ -253,12 +329,17 @@ function getCookie(req, name) {
             .split(";")
             .map(item => item.trim());
 
-    for (const cookie of cookies) {
+    for (
+        const cookie
+        of cookies
+    ) {
 
         const separator =
             cookie.indexOf("=");
 
-        if (separator === -1) {
+        if (
+            separator === -1
+        ) {
             continue;
         }
 
@@ -273,7 +354,9 @@ function getCookie(req, name) {
                 separator + 1
             );
 
-        if (key === name) {
+        if (
+            key === name
+        ) {
 
             try {
 
@@ -320,25 +403,17 @@ function timingSafeEqualString(
     );
 }
 
-function getRawClientIP(req) {
-
-    return String(
-        req.ip ||
-        req.socket.remoteAddress ||
-        "unknown"
-    );
-}
-
 function getIPFingerprint(req) {
+
+    const ip =
+        getClientIP(req);
 
     return crypto
         .createHmac(
             "sha256",
             ADMIN_IP_SECRET
         )
-        .update(
-            getRawClientIP(req)
-        )
+        .update(ip)
         .digest("hex");
 }
 
@@ -440,7 +515,7 @@ app.post(
 );
 
 // ============================================================
-// SESSION AUTHENTICATION
+// SESSION AUTH
 // ============================================================
 
 async function requireSession(
@@ -541,7 +616,9 @@ app.post(
                     gameId.trim();
             }
 
-            if (gameId !== null) {
+            if (
+                gameId !== null
+            ) {
 
                 const game =
                     await pool.query(
@@ -1015,8 +1092,7 @@ app.get(
                         g.url,
                         g.status
 
-                    ORDER BY
-                        launch_count DESC
+                    ORDER BY launch_count DESC
 
                     LIMIT $1
                     `,
@@ -1161,7 +1237,7 @@ async function ensureAdminTables() {
 }
 
 // ============================================================
-// ADMIN SECURITY FUNCTIONS
+// ADMIN SECURITY HELPERS
 // ============================================================
 
 async function logAdminLogin(
@@ -1195,6 +1271,9 @@ async function logAdminLogin(
         );
 
     } catch (error) {
+
+        // Logging should never prevent
+        // the login endpoint from responding.
 
         console.error(
             "ADMIN LOGIN LOG ERROR:",
@@ -1273,7 +1352,9 @@ async function getRecentFailures(
             [ipHash]
         );
 
-    return result.rows[0].failures;
+    return (
+        result.rows[0].failures
+    );
 }
 
 async function autoBlockIfNeeded(
@@ -1323,7 +1404,7 @@ async function autoBlockIfNeeded(
 }
 
 // ============================================================
-// REQUIRE ADMIN
+// ADMIN AUTHENTICATION
 // ============================================================
 
 async function requireAdmin(
@@ -1415,7 +1496,9 @@ app.post(
 
             await cleanupExpiredIPBlocks();
 
-            // CHECK IP BLOCK FIRST
+            // ------------------------------------------------
+            // CHECK IP BLOCK
+            // ------------------------------------------------
 
             const blocked =
                 await getActiveIPBlock(
@@ -1438,6 +1521,10 @@ app.post(
                         blocked.expires_at
                 });
             }
+
+            // ------------------------------------------------
+            // GET CODE
+            // ------------------------------------------------
 
             const submittedCode =
                 String(
@@ -1479,7 +1566,9 @@ app.post(
                 });
             }
 
-            // CHECK ADMIN CODE
+            // ------------------------------------------------
+            // CHECK CODE
+            // ------------------------------------------------
 
             if (
                 !timingSafeEqualString(
@@ -1494,12 +1583,12 @@ app.post(
                     "invalid_code"
                 );
 
-                const blockedNow =
+                const shouldBlock =
                     await autoBlockIfNeeded(
                         ipHash
                     );
 
-                if (blockedNow) {
+                if (shouldBlock) {
 
                     return res.status(429).json({
                         success: false,
@@ -1515,7 +1604,9 @@ app.post(
                 });
             }
 
-            // SUCCESSFUL LOGIN
+            // ------------------------------------------------
+            // CREATE ADMIN SESSION
+            // ------------------------------------------------
 
             const sessionToken =
                 createToken(48);
@@ -1542,11 +1633,19 @@ app.post(
                 [sessionHash]
             );
 
+            // ------------------------------------------------
+            // LOG SUCCESS
+            // ------------------------------------------------
+
             await logAdminLogin(
                 ipHash,
                 true,
                 "success"
             );
+
+            // ------------------------------------------------
+            // SET SECURE COOKIE
+            // ------------------------------------------------
 
             res.setHeader(
                 "Set-Cookie",
@@ -1588,7 +1687,7 @@ app.post(
 );
 
 // ============================================================
-// ADMIN SESSION CHECK
+// ADMIN AUTH CHECK
 // ============================================================
 
 app.get(
@@ -1600,7 +1699,8 @@ app.get(
             success: true,
             authenticated: true,
             admin: {
-                role: "admin"
+                role:
+                    "admin"
             }
         });
     }
@@ -1670,7 +1770,7 @@ app.post(
 );
 
 // ============================================================
-// ADMIN SECURITY LOGS
+// ADMIN SECURITY — LOGIN LOGS
 // ============================================================
 
 app.get(
@@ -1721,7 +1821,7 @@ app.get(
         } catch (error) {
 
             console.error(
-                "SECURITY LOG ERROR:",
+                "SECURITY LOG GET ERROR:",
                 error
             );
 
@@ -1734,7 +1834,7 @@ app.get(
 );
 
 // ============================================================
-// ADMIN BLACKLIST — GET
+// ADMIN SECURITY — BLACKLIST GET
 // ============================================================
 
 app.get(
@@ -1782,7 +1882,7 @@ app.get(
 );
 
 // ============================================================
-// ADMIN BLACKLIST — MANUAL BLOCK
+// ADMIN SECURITY — MANUAL BLOCK
 // ============================================================
 
 app.post(
@@ -1885,7 +1985,7 @@ app.post(
 );
 
 // ============================================================
-// ADMIN BLACKLIST — UNBLOCK
+// ADMIN SECURITY — UNBLOCK
 // ============================================================
 
 app.delete(
@@ -2520,8 +2620,6 @@ async function cleanupAdminData() {
             `
         );
 
-        // Keep login logs for 90 days.
-
         await pool.query(
             `
             DELETE FROM admin_login_logs
@@ -2628,14 +2726,16 @@ async function startServer() {
                     console.log(
                         "Admin security logging enabled."
                     );
+
+                    console.log(
+                        "Admin IP fingerprinting enabled."
+                    );
                 }
             );
 
-        // ====================================================
-        // GRACEFUL SHUTDOWN
-        // ====================================================
-
-        async function shutdown(signal) {
+        async function shutdown(
+            signal
+        ) {
 
             console.log(
                 `${signal} received. Shutting down...`
