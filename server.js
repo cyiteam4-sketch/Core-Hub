@@ -29,8 +29,13 @@ const ADMIN_SECURITY_WINDOW_MINUTES = 15;
 const ADMIN_AUTO_BLOCK_MINUTES = 15;
 const ADMIN_AUTO_BLOCK_FAILED_ATTEMPTS = 5;
 
+// Global admin-login burst protection.
+const GLOBAL_ADMIN_FAILURE_WINDOW_MS = 60_000;
+const GLOBAL_ADMIN_FAILURE_THRESHOLD = 10;
+const GLOBAL_ADMIN_COOLDOWN_MS = 30_000;
+
 // Secret used to create stable IP fingerprints.
-// ADD ADMIN_IP_SECRET TO RENDER.
+// Set ADMIN_IP_SECRET in Render.
 const ADMIN_IP_SECRET =
     process.env.ADMIN_IP_SECRET ||
     process.env.ADMIN_LOGIN_CODE ||
@@ -119,12 +124,27 @@ app.use(
 // CLIENT IP
 // ============================================================
 
+function normalizeIP(ip) {
+
+    let value =
+        String(ip)
+            .trim()
+            .toLowerCase();
+
+    // Convert IPv4-mapped IPv6 to normal IPv4.
+    if (
+        value.startsWith("::ffff:") &&
+        net.isIP(value.slice(7)) === 4
+    ) {
+        value = value.slice(7);
+    }
+
+    return value;
+}
+
 function getClientIP(req) {
 
-    // Cloudflare supplies the original client IP.
-    // Prefer this over req.ip because Render sits behind
-    // proxy/load-balancer infrastructure.
-
+    // Cloudflare's original client address.
     const cloudflareIP =
         req.headers["cf-connecting-ip"];
 
@@ -138,8 +158,7 @@ function getClientIP(req) {
         );
     }
 
-    // Fallback to X-Forwarded-For.
-
+    // Render/proxy forwarded address.
     const forwarded =
         req.headers["x-forwarded-for"];
 
@@ -154,14 +173,9 @@ function getClientIP(req) {
                 .trim();
 
         if (net.isIP(firstIP)) {
-
-            return normalizeIP(
-                firstIP
-            );
+            return normalizeIP(firstIP);
         }
     }
-
-    // Final fallback.
 
     return normalizeIP(
         req.socket.remoteAddress ||
@@ -169,40 +183,13 @@ function getClientIP(req) {
     );
 }
 
-function normalizeIP(ip) {
-
-    let value =
-        String(ip)
-            .trim()
-            .toLowerCase();
-
-    // IPv4-mapped IPv6:
-    // ::ffff:192.168.1.10
-    // becomes:
-    // 192.168.1.10
-
-    if (
-        value.startsWith("::ffff:") &&
-        net.isIP(
-            value.slice(7)
-        ) === 4
-    ) {
-
-        value =
-            value.slice(7);
-    }
-
-    return value;
-}
-
 // ============================================================
-// RATE LIMITER
+// STANDARD RATE LIMITER
 // ============================================================
 
 const rateLimits = new Map();
 
 function getClientKey(req) {
-
     return getClientIP(req);
 }
 
@@ -278,6 +265,81 @@ setInterval(() => {
 }, 60_000);
 
 // ============================================================
+// GLOBAL ADMIN LOGIN BURST PROTECTION
+// ============================================================
+
+const globalAdminFailures = [];
+
+let globalAdminCooldownUntil = 0;
+
+function cleanupGlobalAdminFailures() {
+
+    const cutoff =
+        Date.now() -
+        GLOBAL_ADMIN_FAILURE_WINDOW_MS;
+
+    while (
+        globalAdminFailures.length > 0 &&
+        globalAdminFailures[0] < cutoff
+    ) {
+
+        globalAdminFailures.shift();
+    }
+}
+
+function recordGlobalAdminFailure() {
+
+    cleanupGlobalAdminFailures();
+
+    globalAdminFailures.push(
+        Date.now()
+    );
+
+    if (
+        globalAdminFailures.length >=
+        GLOBAL_ADMIN_FAILURE_THRESHOLD
+    ) {
+
+        globalAdminCooldownUntil =
+            Date.now() +
+            GLOBAL_ADMIN_COOLDOWN_MS;
+
+        // Start a fresh failure window after
+        // the cooldown has been triggered.
+        globalAdminFailures.length = 0;
+
+        return true;
+    }
+
+    return false;
+}
+
+function getGlobalAdminCooldownRemaining() {
+
+    const remaining =
+        globalAdminCooldownUntil -
+        Date.now();
+
+    return Math.max(
+        0,
+        remaining
+    );
+}
+
+function isGlobalAdminLoginBlocked() {
+
+    return (
+        getGlobalAdminCooldownRemaining() > 0
+    );
+}
+
+// Cleanup old entries.
+setInterval(
+    cleanupGlobalAdminFailures,
+    10_000
+);
+
+// ============================================================
 // HELPERS
 // ============================================================
 
@@ -337,9 +399,7 @@ function getCookie(req, name) {
         const separator =
             cookie.indexOf("=");
 
-        if (
-            separator === -1
-        ) {
+        if (separator === -1) {
             continue;
         }
 
@@ -354,18 +414,11 @@ function getCookie(req, name) {
                 separator + 1
             );
 
-        if (
-            key === name
-        ) {
+        if (key === name) {
 
             try {
-
-                return decodeURIComponent(
-                    value
-                );
-
+                return decodeURIComponent(value);
             } catch {
-
                 return value;
             }
         }
@@ -380,14 +433,10 @@ function timingSafeEqualString(
 ) {
 
     const aBuffer =
-        Buffer.from(
-            String(a)
-        );
+        Buffer.from(String(a));
 
     const bBuffer =
-        Buffer.from(
-            String(b)
-        );
+        Buffer.from(String(b));
 
     if (
         aBuffer.length !==
@@ -405,15 +454,14 @@ function timingSafeEqualString(
 
 function getIPFingerprint(req) {
 
-    const ip =
-        getClientIP(req);
-
     return crypto
         .createHmac(
             "sha256",
             ADMIN_IP_SECRET
         )
-        .update(ip)
+        .update(
+            getClientIP(req)
+        )
         .digest("hex");
 }
 
@@ -515,7 +563,7 @@ app.post(
 );
 
 // ============================================================
-// SESSION AUTH
+// SESSION AUTHENTICATION
 // ============================================================
 
 async function requireSession(
@@ -1272,9 +1320,6 @@ async function logAdminLogin(
 
     } catch (error) {
 
-        // Logging should never prevent
-        // the login endpoint from responding.
-
         console.error(
             "ADMIN LOGIN LOG ERROR:",
             error
@@ -1404,7 +1449,7 @@ async function autoBlockIfNeeded(
 }
 
 // ============================================================
-// ADMIN AUTHENTICATION
+// REQUIRE ADMIN
 // ============================================================
 
 async function requireAdmin(
@@ -1494,10 +1539,45 @@ app.post(
 
         try {
 
+            // ------------------------------------------------
+            // GLOBAL BURST CHECK
+            // ------------------------------------------------
+
+            const globalCooldown =
+                getGlobalAdminCooldownRemaining();
+
+            if (globalCooldown > 0) {
+
+                await logAdminLogin(
+                    ipHash,
+                    false,
+                    "global_cooldown"
+                );
+
+                res.set(
+                    "Retry-After",
+                    String(
+                        Math.ceil(
+                            globalCooldown / 1000
+                        )
+                    )
+                );
+
+                return res.status(429).json({
+                    success: false,
+                    error:
+                        "Admin login is temporarily paused because of a high volume of failed attempts.",
+                    retryAfter:
+                        Math.ceil(
+                            globalCooldown / 1000
+                        )
+                });
+            }
+
             await cleanupExpiredIPBlocks();
 
             // ------------------------------------------------
-            // CHECK IP BLOCK
+            // IP BLOCK CHECK
             // ------------------------------------------------
 
             const blocked =
@@ -1523,7 +1603,7 @@ app.post(
             }
 
             // ------------------------------------------------
-            // GET CODE
+            // GET ADMIN CODE
             // ------------------------------------------------
 
             const submittedCode =
@@ -1553,11 +1633,23 @@ app.post(
 
             if (!submittedCode) {
 
+                const triggered =
+                    recordGlobalAdminFailure();
+
                 await logAdminLogin(
                     ipHash,
                     false,
                     "missing_code"
                 );
+
+                if (triggered) {
+
+                    return res.status(429).json({
+                        success: false,
+                        error:
+                            "Admin login is temporarily paused because of a high volume of failed attempts."
+                    });
+                }
 
                 return res.status(400).json({
                     success: false,
@@ -1577,23 +1669,46 @@ app.post(
                 )
             ) {
 
+                const triggered =
+                    recordGlobalAdminFailure();
+
                 await logAdminLogin(
                     ipHash,
                     false,
                     "invalid_code"
                 );
 
-                const shouldBlock =
+                const shouldBlockIP =
                     await autoBlockIfNeeded(
                         ipHash
                     );
 
-                if (shouldBlock) {
+                // If the IP qualifies for a personal block,
+                // store that independently from the global
+                // burst protection.
+                if (shouldBlockIP) {
 
                     return res.status(429).json({
                         success: false,
                         error:
                             "Too many failed admin login attempts. This IP is temporarily blocked."
+                    });
+                }
+
+                // If the entire admin login system is
+                // experiencing a burst, activate the
+                // global cooldown.
+                if (triggered) {
+
+                    return res.status(429).json({
+                        success: false,
+                        error:
+                            "Admin login is temporarily paused because of a high volume of failed attempts.",
+                        retryAfter:
+                            Math.ceil(
+                                GLOBAL_ADMIN_COOLDOWN_MS /
+                                1000
+                            )
                     });
                 }
 
@@ -1605,7 +1720,7 @@ app.post(
             }
 
             // ------------------------------------------------
-            // CREATE ADMIN SESSION
+            // SUCCESSFUL LOGIN
             // ------------------------------------------------
 
             const sessionToken =
@@ -1633,19 +1748,15 @@ app.post(
                 [sessionHash]
             );
 
-            // ------------------------------------------------
-            // LOG SUCCESS
-            // ------------------------------------------------
-
             await logAdminLogin(
                 ipHash,
                 true,
                 "success"
             );
 
-            // ------------------------------------------------
-            // SET SECURE COOKIE
-            // ------------------------------------------------
+            // Successful login is not counted
+            // as a failure and therefore does
+            // not trigger the burst system.
 
             res.setHeader(
                 "Set-Cookie",
@@ -1687,7 +1798,7 @@ app.post(
 );
 
 // ============================================================
-// ADMIN AUTH CHECK
+// ADMIN SESSION CHECK
 // ============================================================
 
 app.get(
@@ -2620,6 +2731,8 @@ async function cleanupAdminData() {
             `
         );
 
+        // Keep security logs for 90 days.
+
         await pool.query(
             `
             DELETE FROM admin_login_logs
@@ -2724,14 +2837,18 @@ async function startServer() {
                     );
 
                     console.log(
-                        "Admin security logging enabled."
+                        "Admin IP security enabled."
                     );
 
                     console.log(
-                        "Admin IP fingerprinting enabled."
+                        "Global admin burst protection enabled."
                     );
                 }
             );
+
+        // ====================================================
+        // GRACEFUL SHUTDOWN
+        // ====================================================
 
         async function shutdown(
             signal
